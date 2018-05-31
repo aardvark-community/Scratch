@@ -1,6 +1,7 @@
+#r @"netstandard.dll"
+#load @".paket\load\main.group.fsx"
 
-
-
+open Aardvark.Base
 
 module QR =
     [<AutoOpen>]
@@ -55,6 +56,8 @@ module QR =
                     applyGivens Q c r cos sin
 
         Q, R
+    
+    
 
 
 
