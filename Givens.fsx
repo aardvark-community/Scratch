@@ -1,17 +1,29 @@
 #r @"netstandard.dll"
 #load @".paket\load\main.group.fsx"
 
+open System.Runtime.CompilerServices
+open Microsoft.FSharp.NativeInterop
 open Aardvark.Base
+
+#nowarn "9"
+#nowarn "51"
 
 module QR =
     [<AutoOpen>]
     module private Helpers = 
-        let inline tiny (eps : float) (v : float) =
+        let inline tiny (eps : 'a) (v : 'a) =
             abs v <= eps
         
         let identity (rows : int) (cols : int) =
             Array2D.init rows cols (fun ri ci ->
                 if ri = ci then 1.0
+                else 0.0
+            )
+
+        let identityMat (rows : int) (cols : int) =
+            let mat = Matrix<float>(int64 cols, int64 rows)
+            mat.SetByCoord(fun (c : V2l) ->
+                if c.X = c.Y then 1.0
                 else 0.0
             )
 
@@ -24,6 +36,48 @@ module QR =
                 mat.[ci, c] <-  cos * A + sin * B
                 mat.[ci, r] <- -sin * A + cos * B
        
+        let applyGivensMat (mat : NativeMatrix<float>) (c : int) (r : int) (cos : float) (sin : float) =
+            let ptrQ = NativePtr.toNativeInt mat.Pointer
+            let dcQ = nativeint sizeof<float> * nativeint mat.DX
+            let drQ = nativeint sizeof<float> * nativeint mat.DY
+            let cols = int mat.SX
+
+            let mutable p0 = ptrQ + nativeint c * dcQ |> NativePtr.ofNativeInt<float>
+            let mutable p1 = ptrQ + nativeint r * dcQ |> NativePtr.ofNativeInt<float>
+            // adjust affected elements
+            for ci in 0 .. cols - 1 do
+                let A = NativePtr.read p0 //mat.[ci, c]
+                let B = NativePtr.read p1 //mat.[ci, r]
+
+                //mat.[ci, c] <-  cos * A + sin * B
+                //mat.[ci, r] <- -sin * A + cos * B
+                NativePtr.write p0 ( cos * A + sin * B )
+                NativePtr.write p1 (-sin * A + cos * B )
+
+                p0 <- NativePtr.ofNativeInt (NativePtr.toNativeInt p0 + drQ)
+                p1 <- NativePtr.ofNativeInt (NativePtr.toNativeInt p1 + drQ)
+
+        let applyGivensMat32 (mat : NativeMatrix<float32>) (c : int) (r : int) (cos : float32) (sin : float32) =
+            let ptrQ = NativePtr.toNativeInt mat.Pointer
+            let dcQ = nativeint sizeof<float32> * nativeint mat.DX
+            let drQ = nativeint sizeof<float32> * nativeint mat.DY
+            let cols = int mat.SX
+
+            let mutable p0 = ptrQ + nativeint c * dcQ |> NativePtr.ofNativeInt<float32>
+            let mutable p1 = ptrQ + nativeint r * dcQ |> NativePtr.ofNativeInt<float32>
+            // adjust affected elements
+            for ci in 0 .. cols - 1 do
+                let A = NativePtr.read p0 //mat.[ci, c]
+                let B = NativePtr.read p1 //mat.[ci, r]
+
+                //mat.[ci, c] <-  cos * A + sin * B
+                //mat.[ci, r] <- -sin * A + cos * B
+                NativePtr.write p0 ( cos * A + sin * B )
+                NativePtr.write p1 (-sin * A + cos * B )
+
+                p0 <- NativePtr.ofNativeInt (NativePtr.toNativeInt p0 + drQ)
+                p1 <- NativePtr.ofNativeInt (NativePtr.toNativeInt p1 + drQ)
+
     let decompose (eps : float) (mat : float[,]) =
         let rows = mat.GetLength(0)
         let cols = mat.GetLength(1)
@@ -56,10 +110,292 @@ module QR =
                     applyGivens Q c r cos sin
 
         Q, R
-    
-    
+
+    let decomposeNative (eps : float) (pQ : NativeMatrix<float>) (pR : NativeMatrix<float>) =
+        let rows = int pR.SY
+        let cols = int pR.SX
+
+        // pQ <- identity
+        pQ.SetByCoord (fun (v : V2i) -> if v.X = v.Y then 1.0 else 0.0)
+        
+        let sa = nativeint sizeof<float>
+        let drR = nativeint pR.DY * sa
+        let dcR = nativeint pR.DX * sa
+        let ptrR = NativePtr.toNativeInt pR.Pointer
+
+        for c in 0 .. cols - 1 do
+            // wiki performs this loop backwards (should not really matter)
+            for r in c + 1 .. rows - 1 do
+                let vcc : float = NativeInt.read (ptrR + nativeint c * (drR + dcR)) //R.[c,c] // important since R.[c,c] changes
+                let vrc : float = NativeInt.read (ptrR + nativeint r * drR + nativeint c * dcR) //R.[r,c]
+
+                // if the dst-element is not already zero then make it zero
+                if not (tiny eps vrc) then
+
+                    // find givens rotation
+                    let rho = float (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
+                    let cos = vcc / rho
+                    let sin = vrc / rho
+                    
+                    let mutable p0 = ptrR + nativeint c * drR |> NativePtr.ofNativeInt<float>
+                    let mutable p1 = ptrR + nativeint r * drR |> NativePtr.ofNativeInt<float>
+                    // adjust affected elements
+                    for ci in 0 .. cols - 1 do
+                        let A = NativePtr.read p0 //R.[c,ci]
+                        let B = NativePtr.read p1 //R.[r,ci]
+
+                        //R.[c,ci] <-  cos * A + sin * B
+                        //R.[r,ci] <- -sin * A + cos * B
+                        NativePtr.write p0 ( cos * A + sin * B )
+                        NativePtr.write p1 (-sin * A + cos * B )
+
+                        p0 <- NativePtr.ofNativeInt (NativePtr.toNativeInt p0 + dcR)
+                        p1 <- NativePtr.ofNativeInt (NativePtr.toNativeInt p1 + dcR)
+
+                        
+                    // adjust the resulting Q matrix
+                    applyGivensMat pQ c r cos sin
+
+    let decomposeNative32 (eps : float32) (pQ : NativeMatrix<float32>) (pR : NativeMatrix<float32>) =
+        let rows = int pR.SY
+        let cols = int pR.SX
+
+        // pQ <- identity
+        pQ.SetByCoord (fun (v : V2i) -> if v.X = v.Y then 1.0f else 0.0f)
+        
+        let sa = nativeint sizeof<float32>
+        let drR = nativeint pR.DY * sa
+        let dcR = nativeint pR.DX * sa
+        let ptrR = NativePtr.toNativeInt pR.Pointer
+
+        for c in 0 .. cols - 1 do
+            // wiki performs this loop backwards (should not really matter)
+            for r in c + 1 .. rows - 1 do
+                let vcc : float32 = NativeInt.read (ptrR + nativeint c * (drR + dcR)) //R.[c,c] // important since R.[c,c] changes
+                let vrc : float32 = NativeInt.read (ptrR + nativeint r * drR + nativeint c * dcR) //R.[r,c]
+
+                // if the dst-element is not already zero then make it zero
+                if not (tiny eps vrc) then
+
+                    // find givens rotation
+                    let rho = float32 (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
+                    let cos = vcc / rho
+                    let sin = vrc / rho
+                    
+                    let mutable p0 = ptrR + nativeint c * drR |> NativePtr.ofNativeInt<float32>
+                    let mutable p1 = ptrR + nativeint r * drR |> NativePtr.ofNativeInt<float32>
+                    // adjust affected elements
+                    for ci in 0 .. cols - 1 do
+                        let A = NativePtr.read p0 //R.[c,ci]
+                        let B = NativePtr.read p1 //R.[r,ci]
+
+                        //R.[c,ci] <-  cos * A + sin * B
+                        //R.[r,ci] <- -sin * A + cos * B
+                        NativePtr.write p0 ( cos * A + sin * B )
+                        NativePtr.write p1 (-sin * A + cos * B )
+
+                        p0 <- NativePtr.ofNativeInt (NativePtr.toNativeInt p0 + dcR)
+                        p1 <- NativePtr.ofNativeInt (NativePtr.toNativeInt p1 + dcR)
+
+                        
+                    // adjust the resulting Q matrix
+                    applyGivensMat32 pQ c r cos sin
 
 
+    let decomposeMat (eps : float) (mat : Matrix<float>) =
+        let rows = int mat.SY
+        let cols = int mat.SX
+
+        let R = mat.Copy()
+        let Q = Matrix<float>(int64 rows, int64 rows)
+
+        
+        NativeMatrix.using R (fun pR ->
+            NativeMatrix.using Q (fun pQ ->
+                decomposeNative eps pQ pR
+                Q, R
+            )
+        )
+[<AbstractClass; Sealed; Extension>]
+type QRExtensions private() =
+    [<Extension>]
+    static member QRFactorize(this : M33d, ?eps : float) =
+        let eps = defaultArg eps 1E-20
+        let mutable Q = M33d()
+        let mutable R = this
+
+        let pQ = 
+            NativeMatrix<float>(
+                NativePtr.cast &&Q,
+                MatrixInfo(
+                    0L,
+                    V2l(3, 3),
+                    V2l(1, 3)
+                )
+            )
+        let pR = 
+            NativeMatrix<float>(
+                NativePtr.cast &&R,
+                MatrixInfo(
+                    0L,
+                    V2l(3, 3),
+                    V2l(1, 3)
+                )
+            )
+        QR.decomposeNative eps pQ pR
+        Q, R
+        
+    [<Extension>]
+    static member QRFactorize(this : M44d, ?eps : float) =
+        let eps = defaultArg eps 1E-20
+        let mutable Q = M44d()
+        let mutable R = this
+
+        let pQ = 
+            NativeMatrix<float>(
+                NativePtr.cast &&Q,
+                MatrixInfo(
+                    0L,
+                    V2l(4, 4),
+                    V2l(1, 4)
+                )
+            )
+        let pR = 
+            NativeMatrix<float>(
+                NativePtr.cast &&R,
+                MatrixInfo(
+                    0L,
+                    V2l(4, 4),
+                    V2l(1, 4)
+                )
+            )
+        QR.decomposeNative eps pQ pR
+        Q, R
+        
+    [<Extension>]
+    static member QRFactorize(this : M34d, ?eps : float) =
+        let eps = defaultArg eps 1E-20
+        let mutable Q = M33d()
+        let mutable R = this
+
+        let pQ = 
+            NativeMatrix<float>(
+                NativePtr.cast &&Q,
+                MatrixInfo(
+                    0L,
+                    V2l(4, 3),
+                    V2l(1, 4)
+                )
+            )
+        let pR = 
+            NativeMatrix<float>(
+                NativePtr.cast &&R,
+                MatrixInfo(
+                    0L,
+                    V2l(4, 3),
+                    V2l(1, 4)
+                )
+            )
+        QR.decomposeNative eps pQ pR
+        Q, R
+        
+    [<Extension>]
+    static member QRFactorize(this : M33f, ?eps : float32) =
+        let eps = defaultArg eps 1E-10f
+        let mutable Q = M33f()
+        let mutable R = this
+
+        let pQ = 
+            NativeMatrix<float32>(
+                NativePtr.cast &&Q,
+                MatrixInfo(
+                    0L,
+                    V2l(3, 3),
+                    V2l(1, 3)
+                )
+            )
+        let pR = 
+            NativeMatrix<float32>(
+                NativePtr.cast &&R,
+                MatrixInfo(
+                    0L,
+                    V2l(3, 3),
+                    V2l(1, 3)
+                )
+            )
+        QR.decomposeNative32 eps pQ pR
+        Q, R
+        
+    [<Extension>]
+    static member QRFactorize(this : M44f, ?eps : float32) =
+        let eps = defaultArg eps 1E-10f
+        let mutable Q = M44f()
+        let mutable R = this
+
+        let pQ = 
+            NativeMatrix<float32>(
+                NativePtr.cast &&Q,
+                MatrixInfo(
+                    0L,
+                    V2l(4, 4),
+                    V2l(1, 4)
+                )
+            )
+        let pR = 
+            NativeMatrix<float32>(
+                NativePtr.cast &&R,
+                MatrixInfo(
+                    0L,
+                    V2l(4, 4),
+                    V2l(1, 4)
+                )
+            )
+        QR.decomposeNative32 eps pQ pR
+        Q, R
+          
+    [<Extension>]
+    static member QRFactorize(this : M34f, ?eps : float32) =
+        let eps = defaultArg eps 1E-10f
+        let mutable Q = M33f()
+        let mutable R = this
+
+        let pQ = 
+            NativeMatrix<float32>(
+                NativePtr.cast &&Q,
+                MatrixInfo(
+                    0L,
+                    V2l(4, 3),
+                    V2l(1, 4)
+                )
+            )
+        let pR = 
+            NativeMatrix<float32>(
+                NativePtr.cast &&R,
+                MatrixInfo(
+                    0L,
+                    V2l(4, 3),
+                    V2l(1, 4)
+                )
+            )
+        QR.decomposeNative32 eps pQ pR
+        Q, R
+        
+module Matrix =
+    open Aardvark.Base.MultimethodTest
+
+    let toArray (m : Matrix<'a>) =
+        Array2D.init (int m.SY) (int m.SX) (fun r c ->
+            m.[c,r]
+        )
+
+    let ofArray (m : 'a[,]) =
+        let r = m.GetLength(0)
+        let c = m.GetLength(1)
+
+        let mat = Matrix(int64 c, int64 r)
+        mat.SetByCoord(fun (c : V2l) ->
+            m.[int c.Y, int c.X]
+        )
 
 [<AutoOpen>]
 module private MatrixUtils =
@@ -74,7 +410,6 @@ module private MatrixUtils =
             let B = mat.[ci, r]
             mat.[ci, c] <-  cos * A + sin * B
             mat.[ci, r] <- -sin * A + cos * B
-       
 
     let print (m : float[,]) =
         let rows = m.GetLength(0)
@@ -210,7 +545,10 @@ module QRTest =
         
 
     let check (eps : float) (mat : float[,]) =
-        let Q, R = QR.decompose eps mat
+        let Q, R = QR.decomposeMat eps (Matrix.ofArray mat)
+        let Q = Matrix.toArray Q
+        let R = Matrix.toArray R
+
         let mutable valid = true
 
         let min, max, avg = rightUpper R
@@ -266,7 +604,10 @@ module QRTest =
         for i in 1 .. iter do
             if not error then
                 let mat = if rand.NextDouble() > 0.1 then random() else randomSpecial()
-                let Q, R = QR.decompose 1.0E-20 mat
+                let Q, R = QR.decomposeMat 1.0E-20 (Matrix.ofArray mat)
+                let Q = Matrix.toArray Q
+                let R = Matrix.toArray R
+
 
                 let (min, max, avg) = rightUpper R
                 if max > tolerance then 
