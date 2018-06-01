@@ -1,7 +1,4 @@
-#r @"netstandard.dll"
-#load @".paket\load\main.group.fsx"
-
-open System.Runtime.CompilerServices
+﻿open System.Runtime.CompilerServices
 open Microsoft.FSharp.NativeInterop
 open Aardvark.Base
 
@@ -36,7 +33,7 @@ module QR =
                 mat.[ci, c] <-  cos * A + sin * B
                 mat.[ci, r] <- -sin * A + cos * B
        
-        let inline applyGivensMat (mat : NativeMatrix<float>) (c : int) (r : int) (cos : float) (sin : float) =
+        let applyGivensMat (mat : NativeMatrix<float>) (c : int) (r : int) (cos : float) (sin : float) =
             let ptrQ = NativePtr.toNativeInt mat.Pointer
             let dcQ = nativeint sizeof<float> * nativeint mat.DX
             let drQ = nativeint sizeof<float> * nativeint mat.DY
@@ -57,7 +54,7 @@ module QR =
                 p0 <- p0 + drQ
                 p1 <- p1 + drQ
 
-        let inline applyGivensMat32 (mat : NativeMatrix<float32>) (c : int) (r : int) (cos : float32) (sin : float32) =
+        let applyGivensMat32 (mat : NativeMatrix<float32>) (c : int) (r : int) (cos : float32) (sin : float32) =
             let ptrQ = NativePtr.toNativeInt mat.Pointer
             let dcQ = nativeint sizeof<float32> * nativeint mat.DX
             let drQ = nativeint sizeof<float32> * nativeint mat.DY
@@ -117,17 +114,16 @@ module QR =
 
         // pQ <- identity
         pQ.SetByCoord (fun (v : V2i) -> if v.X = v.Y then 1.0 else 0.0)
-        
+
         let sa = nativeint sizeof<float>
         let drR = nativeint pR.DY * sa
         let dcR = nativeint pR.DX * sa
+        let sa = ()
 
-        let mutable pc0 = NativePtr.toNativeInt pR.Pointer
-        let mutable pcc = pc0
+        let mutable pcc = NativePtr.toNativeInt pR.Pointer
         for c in 0 .. cols - 1 do
             // wiki performs this loop backwards (should not really matter)
             let mutable prc = pcc + drR
-            let mutable pr0 = pc0 + drR
             for r in c + 1 .. rows - 1 do 
                 let vcc : float = NativeInt.read pcc // important since R.[c,c] changes
                 let vrc : float = NativeInt.read prc 
@@ -146,21 +142,18 @@ module QR =
                     for ci in c .. cols - 1 do
                         let A = NativeInt.read<float> p0
                         let B = NativeInt.read<float> p1
-                        
+                        System.Console.ReadLine() |> ignore
+
                         NativeInt.write p0 ( cos * A + sin * B )
                         NativeInt.write p1 (-sin * A + cos * B )
-                        
+
                         p0 <- p0 + dcR
                         p1 <- p1 + dcR
-
-                        
+ 
                     // adjust the resulting Q matrix
                     applyGivensMat pQ c r cos sin
-                
-                pr0 <- pr0 + drR
+                    
                 prc <- prc + drR
-            
-            pc0 <- pc0 + drR
             pcc <- pcc + drR + dcR
 
     let decomposeNative32 (eps : float32) (pQ : NativeMatrix<float32>) (pR : NativeMatrix<float32>) =
@@ -173,13 +166,11 @@ module QR =
         let sa = nativeint sizeof<float32>
         let drR = nativeint pR.DY * sa
         let dcR = nativeint pR.DX * sa
-
-        let mutable pc0 = NativePtr.toNativeInt pR.Pointer
-        let mutable pcc = pc0
+        
+        let mutable pcc = NativePtr.toNativeInt pR.Pointer
         for c in 0 .. cols - 1 do
             // wiki performs this loop backwards (should not really matter)
             let mutable prc = pcc + drR
-            let mutable pr0 = pc0 + drR
             for r in c + 1 .. rows - 1 do 
                 let vcc = NativeInt.read<float32> pcc // important since R.[c,c] changes
                 let vrc = NativeInt.read<float32> prc 
@@ -209,10 +200,8 @@ module QR =
                     // adjust the resulting Q matrix
                     applyGivensMat32 pQ c r cos sin
                 
-                pr0 <- pr0 + drR
                 prc <- prc + drR
             
-            pc0 <- pc0 + drR
             pcc <- pcc + drR + dcR
 
     let decomposeMat (eps : float) (mat : Matrix<float>) =
@@ -549,6 +538,19 @@ module QRTest =
                 mat
         |]
 
+    let randomSymmetric () =
+        let size = rand.Next(20) + 1
+
+        let m = 
+            Array2D.init size size (fun r c ->
+                rand.NextDouble() * 20.0 - 10.0
+            )
+
+        for r in 0..size-1 do
+            for c in 0..r-1 do  
+                m.[r,c] <- m.[c,r]
+        m
+
     let randomSpecial () =
         let rows = rand.Next(10) + 1
         let cols = rand.Next(10) + 1
@@ -710,6 +712,22 @@ module QRTest =
             let m = random()
             valid <- valid && check 1.0E-20 m
 
+    let symmetricExample() =
+        let m = randomSymmetric()
+
+        let Q,R = QR.decompose 1E-20 m
+
+        printfn "input:"
+        print m
+
+        printfn "Q:"
+        print Q
+
+        printfn "R:" 
+        print R
+
+
+
     // https://de.wikipedia.org/wiki/Givens-Rotation
     let wikiExample() =
         let A = 
@@ -752,5 +770,41 @@ module QRTest =
         printfn "R: "
         print R
         
+    let qrAlgorithm () =
+        let rows = 9
+        let cols = 8
 
-do QRTest.validate 1
+        let A = 
+            Array2D.init rows cols (fun r c ->
+                rand.NextDouble() * 20.0 - 10.0
+            )
+
+        let AA = mul (transpose A) A
+
+        let mutable mat = AA
+        let mutable lastV = identity (mat.GetLength(0)) (mat.GetLength(1))
+        for _ in 1..500 do
+            let Q,R = QR.decompose 1E-20 mat
+            lastV <- mul lastV Q
+            mat <- mul R Q
+        
+        //let sigma = mat |> Array2D.map sqrt
+        
+        let (U,S) = QR.decompose 1E-20 (mul A lastV)
+
+
+
+
+        print U 
+        printfn "==="
+        print S
+        printfn "==="
+        print lastV
+     
+        let test = mul U (mul S (transpose lastV))
+        printfn "%A" <| distanceMinMaxAvg test A
+        
+[<EntryPoint>]
+let main argv = 
+    QRTest.qrAlgorithm()
+    0
