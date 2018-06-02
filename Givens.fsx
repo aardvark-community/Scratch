@@ -304,9 +304,7 @@ module QR =
                         B.[r1,ci] <- -sin * a + cos * b
                         
                     applyGivens U r0 r1 cos sin
-
-
-
+                    
                     let c0 = r0 + 1
                     let c1 = r0 + 2
                     if c1 < cols then
@@ -324,7 +322,7 @@ module QR =
                             B.[ri,c0] <-  cos * a + sin * b
                             B.[ri,c1] <- -sin * a + cos * b
                         
-                        applyGivensTransposed U c0 c1 cos sin
+                        applyGivensTransposed Vt c0 c1 cos sin
 
                     //br <- rows
                     br <- br + 1
@@ -1086,6 +1084,8 @@ module QRTest =
         let test = mul U (mul B Vt)
         printfn "%A" <| distanceMinMaxAvg test m
         
+        printfn "det(U) = %A" (determinant U)
+        printfn "det(V) = %A" (determinant Vt)
         ()
         //printfn "Vt"
         //print Vt
