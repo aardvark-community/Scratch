@@ -9,6 +9,8 @@ open Aardvark.Base
 #nowarn "51"
 
 module QR =
+    open System.Web.UI.WebControls
+
     [<AutoOpen>]
     module private Helpers = 
         let inline tiny (eps : 'a) (v : 'a) =
@@ -35,7 +37,16 @@ module QR =
                 let B = mat.[ci, r]
                 mat.[ci, c] <-  cos * A + sin * B
                 mat.[ci, r] <- -sin * A + cos * B
-       
+
+        let applyGivensTransposed (mat : float[,]) (c : int) (r : int) (cos : float) (sin : float) =
+            let rows = mat.GetLength(1)
+            // adjust affected elements
+            for ri in 0 .. rows - 1 do
+                let A = mat.[c, ri]
+                let B = mat.[r, ri]
+                mat.[c, ri] <-  cos * A + sin * B
+                mat.[r, ri] <- -sin * A + cos * B
+            
         let inline applyGivensMat (mat : NativeMatrix<float>) (c : int) (r : int) (cos : float) (sin : float) =
             let ptrQ = NativePtr.toNativeInt mat.Pointer
             let dcQ = nativeint sizeof<float> * nativeint mat.DX
@@ -110,6 +121,237 @@ module QR =
                     applyGivens Q c r cos sin
 
         Q, R
+
+
+    let bidiagonalize (eps : float) (mat : float[,]) =
+        let rows = mat.GetLength(0)
+        let cols = mat.GetLength(1)
+        
+        let B = Array2D.copy mat
+        let U = identity rows rows
+        let Vt = identity cols cols
+
+        for i in 0 .. cols - 1 do
+            // wiki performs this loop backwards (should not really matter)
+            let c = i
+            let r0 = i
+            for r1 in r0 + 1 .. rows - 1 do
+                let vcc = B.[r0,c] // important since R.[c,c] changes
+                let vrc = B.[r1,c]
+
+                // if the dst-element is not already zero then make it zero
+                if not (tiny eps vrc) then
+
+                    // find givens rotation
+                    let rho = float (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
+                    let cos = vcc / rho
+                    let sin = vrc / rho
+                    
+                    // adjust affected elements
+                    for ci in 0 .. cols - 1 do
+                        let a = B.[r0,ci]
+                        let b = B.[r1,ci]
+                        B.[r0,ci] <-  cos * a + sin * b
+                        B.[r1,ci] <- -sin * a + cos * b
+                        
+                    // adjust the resulting Q matrix
+                    applyGivens U r0 r1 cos sin
+                    
+            let r = i
+            let c0 = r + 1
+            for c1 in c0 + 1 .. cols - 1 do
+                let vcc = B.[r,c0] // important since R.[c,c] changes
+                let vrc = B.[r,c1]
+
+                // if the dst-element is not already zero then make it zero
+                if not (tiny eps vrc) then
+
+                    // find givens rotation
+                    let rho = if vcc = 0.0 then abs vrc else float (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
+                    let sin = vrc / rho
+                    let cos = vcc / rho
+
+                    // adjust affected elements
+                    for ri in 0 .. rows - 1 do
+                        let a = B.[ri, c0]
+                        let b = B.[ri, c1]
+                        B.[ri, c0] <- cos * a + sin * b
+                        B.[ri, c1] <- -sin * a + cos * b
+                        
+                    // adjust the resulting Q matrix
+                    applyGivensTransposed Vt c0 c1 cos sin
+
+        U, B, Vt
+
+    module Array2D =
+        let toSeq (a : 'a[,]) =
+            seq {
+                for i0 in 0 .. a.GetLength(0) - 1 do
+                    for i1 in 0 .. a.GetLength(1) - 1 do
+                        yield a.[i0, i1]
+            }
+
+    let printTable (sep : bool) (arr : string[,]) =
+        
+        let maxLength =
+            arr |> Array2D.toSeq |> Seq.map (fun str -> str.Length) |> Seq.max
+
+        let pad (str : string) =
+            if str.Length < maxLength then
+                let diff = maxLength - str.Length
+                let left = diff / 2
+                let right = diff - left
+                System.String(' ', left) + str + System.String(' ', right)
+            else
+                str
+            
+        let totalLength = arr.GetLength(1) * (maxLength + 4) //+ (arr.[0].Length - 1) * 3
+        
+        let line = System.String('-', totalLength)
+        if sep then printfn "%s" line
+
+        for r in 0 .. arr.GetLength(0) - 1 do
+            if sep then printf "|"
+            for c in 0 .. arr.GetLength(1) - 1 do
+                let e = arr.[r,c]
+                if sep then printf " %s | " (pad e)
+                else printf " %s " (pad e)
+            printfn ""
+                
+        if sep then printfn "%s" line
+        ()
+
+
+    let print (m : float[,]) =
+        m |> Array2D.map (sprintf "%.3f") |> printTable false
+
+    let svdBidiagonal (eps : float) (U : float[,]) (mat : float[,]) (Vt : float[,]) =
+        let rows = mat.GetLength(0)
+        let cols = mat.GetLength(1)
+        if cols < 2 then
+            failwith "think"
+        else
+
+            let U = Array2D.copy U
+            let B = Array2D.copy mat
+            let Vt = Array2D.copy Vt
+
+            /// wilkinson shift for symmetric 2x2 matrix
+            /// | a | b |
+            /// | b | c |
+            let wilkinson (a : float) (b : float) (c : float) =
+                if tiny eps b then
+                    c
+                else
+                    let s = (a - c) / 2.0
+                    c - (float (sign b) * b * b) / (abs s + sqrt (s*s + b*b))
+
+            for iter in 1 .. 1000 do
+                // https://web.stanford.edu/class/cme335/lecture6.pdf
+                
+                // Step 1
+                // find wilkinson shift for T = Bt * B (symmetric tridiagonal)
+                let d0 = B.[0,0]
+                let d1 = B.[1,1]
+                let f0 = B.[0,1]
+                let t00 = d0 * d0
+                let t10 = d0 * f0
+                let t11 = d1 * d1
+                let my = wilkinson t00 t10 t11
+                
+                // shift T to T - my*I
+                let ts00 = d0 //t00 - my
+                let ts10 = f0 //t10
+                
+
+                // Step 2
+                if not (tiny eps ts10) then
+                    // find givens rotation for shifted T
+                    let rho = float (sign ts00) * sqrt (ts00 * ts00 + ts10 * ts10)
+                    let cos = ts00 / rho
+                    let sin = ts10 / rho
+                    
+                    // adjust affected elements
+                    for ri in 0 .. rows - 1 do
+                        let a = B.[ri,0]
+                        let b = B.[ri,1]
+                        B.[ri,0] <-  cos * a + sin * b
+                        B.[ri,1] <- -sin * a + cos * b
+
+                    applyGivensTransposed Vt 0 1 cos sin
+
+                // Step 3
+                let mutable br = 1
+                let mutable bc = 0
+
+
+                while br < rows && bc < cols do
+                    let r0 = br - 1
+                    let r1 = br
+                    
+                    let v0 = B.[r0, bc]
+                    let v1 = B.[r1, bc]
+                    // find givens rotation
+                    let rho = float (sign v0) * sqrt (v0 * v0 + v1 * v1)
+                    let cos = v0 / rho
+                    let sin = v1 / rho
+                    
+                    // adjust affected elements
+                    for ci in 0 .. cols - 1 do
+                        let a = B.[r0,ci]
+                        let b = B.[r1,ci]
+                        B.[r0,ci] <-  cos * a + sin * b
+                        B.[r1,ci] <- -sin * a + cos * b
+                        
+                    applyGivens U r0 r1 cos sin
+
+
+
+                    let c0 = r0 + 1
+                    let c1 = r0 + 2
+                    if c1 < cols then
+                        let v0 = B.[r0, c0]
+                        let v1 = B.[r0, c1]
+                        // find givens rotation
+                        let rho = float (sign v0) * sqrt (v0 * v0 + v1 * v1)
+                        let cos = v0 / rho
+                        let sin = v1 / rho
+
+                        // adjust affected elements
+                        for ri in 0 .. rows - 1 do
+                            let a = B.[ri, c0]
+                            let b = B.[ri, c1]
+                            B.[ri,c0] <-  cos * a + sin * b
+                            B.[ri,c1] <- -sin * a + cos * b
+                        
+                        applyGivensTransposed U c0 c1 cos sin
+
+                    //br <- rows
+                    br <- br + 1
+                    bc <- bc + 1
+                    
+                printfn "B"
+                print B
+             
+
+
+
+
+                // T = Bt * B
+                // T € cols * cols
+                
+                // let t r c = sum 0 (rows-1) (fun k -> Bt.[r, k] * B.[k, c])
+                // let t r c = sum 0 (rows-1) (fun k -> B.[k, r] * B.[k, c])
+
+                // wlog: r <= c
+                // let t r c = sum r (rows-1) (fun k -> B.[k, r] * B.[k, c])
+                
+                
+
+            U, B, Vt
+
+        
+
 
     let decomposeNative (eps : float) (pQ : NativeMatrix<float>) (pR : NativeMatrix<float>) =
         let rows = int pR.SY
@@ -410,9 +652,17 @@ module Matrix =
         )
 
 [<AutoOpen>]
-module private MatrixUtils =
-
+module MatrixUtils =
+    
     let tolerance = 1E-8
+
+    module Array2D =
+        let toSeq (a : 'a[,]) =
+            seq {
+                for i0 in 0 .. a.GetLength(0) - 1 do
+                    for i1 in 0 .. a.GetLength(1) - 1 do
+                        yield a.[i0, i1]
+            }
 
     let applyGivens (mat : float[,]) (c : int) (r : int) (cos : float) (sin : float) =
         let cols = mat.GetLength(0)
@@ -423,14 +673,39 @@ module private MatrixUtils =
             mat.[ci, c] <-  cos * A + sin * B
             mat.[ci, r] <- -sin * A + cos * B
 
-    let print (m : float[,]) =
-        let rows = m.GetLength(0)
-        let cols = m.GetLength(1)
+    let printTable (sep : bool) (arr : string[,]) =
+        
+        let maxLength =
+            arr |> Array2D.toSeq |> Seq.map (fun str -> str.Length) |> Seq.max
 
-        for ri in 0 .. rows - 1 do
-            for ci in 0 .. cols - 1 do
-                printf "%.3f " m.[ri,ci]
+        let pad (str : string) =
+            if str.Length < maxLength then
+                let diff = maxLength - str.Length
+                let left = diff / 2
+                let right = diff - left
+                System.String(' ', left) + str + System.String(' ', right)
+            else
+                str
+            
+        let totalLength = arr.GetLength(1) * (maxLength + 4) //+ (arr.[0].Length - 1) * 3
+        
+        let line = System.String('-', totalLength)
+        if sep then printfn "%s" line
+
+        for r in 0 .. arr.GetLength(0) - 1 do
+            if sep then printf "|"
+            for c in 0 .. arr.GetLength(1) - 1 do
+                let e = arr.[r,c]
+                if sep then printf " %s | " (pad e)
+                else printf " %s " (pad e)
             printfn ""
+                
+        if sep then printfn "%s" line
+        ()
+
+
+    let print (m : float[,]) =
+        m |> Array2D.map (sprintf "%.3f") |> printTable false
 
 
 
@@ -461,7 +736,45 @@ module private MatrixUtils =
         Array2D.init r c (fun r c ->
             A.[c,r]
         )
-        
+
+    let skip (r : int) (c : int) (A : 'a[,])=
+        let rows = A.GetLength(0)
+        let cols = A.GetLength(1)
+        Array2D.init (rows - 1) (cols - 1) (fun ri ci ->
+            let ri = if ri >= r then ri + 1 else ri
+            let ci = if ci >= c then ci + 1 else ci
+            A.[ri,ci]
+        )    
+
+    let rec determinant (A : float[,]) =
+        let rows = A.GetLength(0)
+        let cols = A.GetLength(1)
+        if rows <> cols then failwith "not quadratic"
+        let size = rows
+        match size with
+            | 1 -> 
+                A.[0,0]
+            | 2 -> 
+                A.[0,0] * A.[1,1] - A.[1,0] * A.[0,1]
+
+            | 3 ->
+                A.[0,0] * A.[1,1] * A.[2,2] +
+                A.[0,1] * A.[1,2] * A.[2,0] +
+                A.[0,2] * A.[1,0] * A.[2,1] -
+                A.[0,2] * A.[1,1] * A.[2,0] -
+                A.[0,1] * A.[1,0] * A.[2,2] -
+                A.[0,0] * A.[1,2] * A.[2,1]
+
+            | _ ->
+                let mutable sum = 0.0
+                let mutable s = 1.0
+                for i in 0 .. size - 1 do
+                    let d = determinant (skip 0 i A)
+                    sum <- sum + s * A.[0,i] * d
+                    s <- -s
+                sum
+
+
     let distanceMinMaxAvg (A : float[,]) (B : float[,]) =
         let mutable dmin = System.Double.PositiveInfinity
         let mutable dmax = 0.0
@@ -752,5 +1065,28 @@ module QRTest =
         printfn "R: "
         print R
         
+    let bidiag() =
+        let rows = 6
+        let cols = 6
 
-do QRTest.validate 1
+        let m = 
+            Array2D.init rows cols (fun r c ->
+                rand.NextDouble() * 20.0 - 10.0
+            )
+
+        let (U,B,Vt) = QR.bidiagonalize 1E-20 m
+
+        let test = mul U (mul B Vt)
+        printfn "%A" <| distanceMinMaxAvg test m
+        
+        printfn "B"
+        print B
+
+        let (U,B,Vt) = QR.svdBidiagonal 1E-20 U B Vt
+        let test = mul U (mul B Vt)
+        printfn "%A" <| distanceMinMaxAvg test m
+        
+        ()
+        //printfn "Vt"
+        //print Vt
+        
