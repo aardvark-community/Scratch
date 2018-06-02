@@ -236,6 +236,8 @@ module QR =
             let B = Array2D.copy mat
             let Vt = Array2D.copy Vt
 
+            let inline sgn v = if v < 0.0 then -1.0 else 1.0
+
             /// wilkinson shift for symmetric 2x2 matrix
             /// | a | b |
             /// | b | c |
@@ -244,92 +246,160 @@ module QR =
                     c
                 else
                     let s = (a - c) / 2.0
-                    c - (float (sign b) * b * b) / (abs s + sqrt (s*s + b*b))
+                    c - (sgn s * b * b) / (abs s + sqrt (s*s + b*b))
 
-            for iter in 1 .. 1000 do
+            let size = min cols rows
+
+            let mutable lastErr = System.Double.PositiveInfinity
+            let mutable err = System.Double.MaxValue
+            let mutable iter = 0
+            while lastErr <> err do
                 // https://web.stanford.edu/class/cme335/lecture6.pdf
-                
+                // http://www.math.cornell.edu/~web6140/TopTenAlgorithms/QRalgorithm.html
+
                 // Step 1
                 // find wilkinson shift for T = Bt * B (symmetric tridiagonal)
-                let d0 = B.[0,0]
-                let d1 = B.[1,1]
-                let f0 = B.[0,1]
-                let t00 = d0 * d0
-                let t10 = d0 * f0
-                let t11 = d1 * d1
-                let my = wilkinson t00 t10 t11
+                // T € cols x cols
+                // tij = sum 0 (rows-1) (fun x -> Bt.[i,x] * B.[x,j])
+                // tij = sum 0 (rows-1) (fun x -> B.[x,i] * B.[x,j])
+
+                // bidiagonal
+                // i > j        -> B.[i,j] = 0
+                // i < j - 1    -> B.[i,j] = 0
+
+                // i = j
+                // tii = sum 0 rows (fun x -> B.[x,i] * B.[x,i])
+                // tii = B.[i,i]^2 + B.[i,i+1]*B.[i,i+1]
+
+                // i < j
+                // tij = sum 0 rows (fun x -> B.[x,i] * B.[x,j])
+
+                let my =
+                    if rows < cols then
+                        let f1 = B.[rows-2, rows-1]
+                        let d2 = B.[rows-1, rows-1]
+                        let f2 = B.[rows-1, rows]
+
+                        let t00 = f1*f1 + d2*d2
+                        let t10 = d2*f2
+                        let t11 = f2*f2
+
+                        wilkinson t00  t10 t11
+                    else
+                        let f0 = B.[cols-3, cols-2]
+                        let d1 = B.[cols-2, cols-2]
+                        let f1 = B.[cols-2, cols-1]
+                        let d2 = B.[cols-1, cols-1]
+
+                        let t00 = f0*f0 + d1*d1
+                        let t10 = d1*f1
+                        let t11 = f1*f1 + d2*d2
+
+                        wilkinson t00 t10 t11
+
+                //B.[rows - 1
                 
-                // shift T to T - my*I
-                let ts00 = d0 //t00 - my
-                let ts10 = f0 //t10
+                let mutable rs = 0
+
+                //while rs < rows && rs + 1 < cols && tiny 1E-8 B.[rs,rs + 1] do
+                //    rs <- rs + 1
+
+                //printfn "start: %A" rs
+                if rs + 1 < cols then
+                    let t00 = 
+                        if rs > 0 then B.[rs-1,rs] * B.[rs-1, rs] + B.[rs,rs] * B.[rs,rs]
+                        else B.[rs,rs] * B.[rs,rs]
+
+                    let t10 = B.[rs,rs] * B.[rs,rs+1]
+
+                    // shift T to T - my*I
+                    let ts00 = t00 - my
+                    let ts10 = t10
                 
-
-                // Step 2
-                if not (tiny eps ts10) then
-                    // find givens rotation for shifted T
-                    let rho = float (sign ts00) * sqrt (ts00 * ts00 + ts10 * ts10)
-                    let cos = ts00 / rho
-                    let sin = ts10 / rho
+                    // Step 2
+                    if not (tiny eps ts10) then
+                        // find givens rotation for shifted T
+                        let rho = sgn ts00 * sqrt (ts00 * ts00 + ts10 * ts10)
+                        let cos = ts00 / rho
+                        let sin = ts10 / rho
                     
-                    // adjust affected elements
-                    for ri in 0 .. rows - 1 do
-                        let a = B.[ri,0]
-                        let b = B.[ri,1]
-                        B.[ri,0] <-  cos * a + sin * b
-                        B.[ri,1] <- -sin * a + cos * b
-
-                    applyGivensTransposed Vt 0 1 cos sin
-
-                // Step 3
-                let mutable br = 1
-                let mutable bc = 0
-
-
-                while br < rows && bc < cols do
-                    let r0 = br - 1
-                    let r1 = br
-                    
-                    let v0 = B.[r0, bc]
-                    let v1 = B.[r1, bc]
-                    // find givens rotation
-                    let rho = float (sign v0) * sqrt (v0 * v0 + v1 * v1)
-                    let cos = v0 / rho
-                    let sin = v1 / rho
-                    
-                    // adjust affected elements
-                    for ci in 0 .. cols - 1 do
-                        let a = B.[r0,ci]
-                        let b = B.[r1,ci]
-                        B.[r0,ci] <-  cos * a + sin * b
-                        B.[r1,ci] <- -sin * a + cos * b
-                        
-                    applyGivens U r0 r1 cos sin
-                    
-                    let c0 = r0 + 1
-                    let c1 = r0 + 2
-                    if c1 < cols then
-                        let v0 = B.[r0, c0]
-                        let v1 = B.[r0, c1]
-                        // find givens rotation
-                        let rho = float (sign v0) * sqrt (v0 * v0 + v1 * v1)
-                        let cos = v0 / rho
-                        let sin = v1 / rho
-
                         // adjust affected elements
                         for ri in 0 .. rows - 1 do
-                            let a = B.[ri, c0]
-                            let b = B.[ri, c1]
-                            B.[ri,c0] <-  cos * a + sin * b
-                            B.[ri,c1] <- -sin * a + cos * b
-                        
-                        applyGivensTransposed Vt c0 c1 cos sin
+                            let a = B.[ri,rs]
+                            let b = B.[ri,rs+1]
+                            B.[ri,rs] <-    cos * a + sin * b
+                            B.[ri,rs+1] <- -sin * a + cos * b
 
-                    //br <- rows
-                    br <- br + 1
-                    bc <- bc + 1
+                        applyGivensTransposed Vt rs (rs+1) cos sin
+
+                    // Step 3
+                    let mutable br = rs+1
+                    let mutable bc = rs
+
+
+                    while br < rows && bc < cols do
+                        let r0 = br - 1
+                        let r1 = br
                     
-                printfn "B"
-                print B
+             
+                        let v0 = B.[r0, bc]
+                        let v1 = B.[r1, bc]
+                        if not (tiny eps v1) then
+
+                            // find givens rotation
+                            let rho = sgn v0 * sqrt (v0 * v0 + v1 * v1)
+                            let cos = v0 / rho
+                            let sin = v1 / rho
+                    
+                            // adjust affected elements
+                            for ci in 0 .. cols - 1 do
+                                let a = B.[r0,ci]
+                                let b = B.[r1,ci]
+                                B.[r0,ci] <-  cos * a + sin * b
+                                B.[r1,ci] <- -sin * a + cos * b
+                        
+                            applyGivens U r0 r1 cos sin
+                    
+                        let c0 = r0 + 1
+                        let c1 = r0 + 2
+                        if c1 < cols then
+                            let v0 = B.[r0, c0]
+                            let v1 = B.[r0, c1]
+                            if not (tiny eps v1) then
+                                // find givens rotation
+                                let rho = sgn v0 * sqrt (v0 * v0 + v1 * v1)
+                                let cos = v0 / rho
+                                let sin = v1 / rho
+
+                                // adjust affected elements
+                                for ri in 0 .. rows - 1 do
+                                    let a = B.[ri, c0]
+                                    let b = B.[ri, c1]
+                                    B.[ri,c0] <-  cos * a + sin * b
+                                    B.[ri,c1] <- -sin * a + cos * b
+                        
+                                applyGivensTransposed Vt c0 c1 cos sin
+
+                        //br <- rows
+                        br <- br + 1
+                        bc <- bc + 1
+                    
+                    let mutable e = 0.0
+                    for r in 0 .. rows - 1 do
+                        if r < cols - 1 then
+                            let v = B.[r, r+1]
+                            if tiny eps v then
+                                printfn "tiny"
+                            e <- max e (abs v)
+
+                    lastErr <- err
+                    err <- e
+                    iter <- iter + 1
+
+                    printfn "%d: %.3e" iter err
+
+                //printfn "B"
+                //print B
              
 
 
@@ -346,7 +416,7 @@ module QR =
                 
                 
 
-            U, B, Vt
+            U, B, Vt, err
 
         
 
@@ -1080,10 +1150,13 @@ module QRTest =
         printfn "B"
         print B
 
-        let (U,B,Vt) = QR.svdBidiagonal 1E-20 U B Vt
+        let (U,B,Vt,err) = QR.svdBidiagonal 1E-20 U B Vt
         let test = mul U (mul B Vt)
         printfn "%A" <| distanceMinMaxAvg test m
         
+        printfn "B"
+        print B
+        printfn "err = %.3e" err
         printfn "det(U) = %A" (determinant U)
         printfn "det(V) = %A" (determinant Vt)
         ()
