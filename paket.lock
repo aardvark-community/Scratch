@@ -37,6 +37,10 @@ NUGET
     System.Dynamic.Runtime (4.3)
     System.Reactive (4.0)
   remote: https://vrvis.myget.org/F/aardvark_public/api/v3/index.json
+    Aardvark.Base.IO (4.0.13)
+      Aardvark.Base (4.0.13)
+      DevILSharp (>= 0.2.4 < 0.3)
+      System.Dynamic.Runtime (>= 4.3 < 4.4)
     Aardvark.Base.Runtime (4.0.13)
       Aardvark.Base.FSharp (4.0.13)
       Aardvark.Base.Incremental (4.0.13)
@@ -55,3 +59,9 @@ NUGET
       Aardvark.Base.FSharp (>= 4.0 < 4.1)
       FSharp.Core (>= 4.3 < 4.4)
       FsPickler (>= 5.2 < 5.3)
+  remote: https://vrvis.myget.org/F/aardvark/api/v3/index.json
+    Aardvark.VRVis.Base (4.0.8)
+      Aardvark.Base (>= 4.0.11 < 4.1)
+      Aardvark.Base.Essentials (>= 4.0.11 < 4.1)
+      Aardvark.Base.IO (>= 4.0.11 < 4.1)
+      System.Reactive (>= 4.0.0-preview00001 < 4.1.0-preview)
