@@ -184,7 +184,16 @@ module QR =
                     // adjust affected elements
                     let mutable pr0 = pii 
                     let mutable pr1 = pi1i
-                    for _ in i .. cols - 1 do
+
+                    // first iteration
+                    let a = NativeInt.read<float> pr0 //B.[r0,ci]
+                    let b = NativeInt.read<float> pr1 //B.[r1,ci]
+                    NativeInt.write pr0 ( cos * a + sin * b )
+                    NativeInt.write pr1 0.0
+                    pr1 <- pr1 + dbc
+                    pr0 <- pr0 + dbc
+
+                    for _ in i + 1 .. cols - 1 do
                         let a = NativeInt.read<float> pr0 //B.[r0,ci]
                         let b = NativeInt.read<float> pr1 //B.[r1,ci]
                         NativeInt.write pr0 ( cos * a + sin * b )
@@ -219,7 +228,17 @@ module QR =
                     // adjust affected elements
                     let mutable pc0 = pii
                     let mutable pc1 = pij
-                    for _ in i-1 .. rows - 1 do
+                    
+                    // first iteration
+                    let a = NativeInt.read<float> pc0 //B.[r0,ci]
+                    let b = NativeInt.read<float> pc1 //B.[r1,ci]
+                    NativeInt.write pc0 ( cos * a + sin * b )
+                    NativeInt.write pc1 0.0
+                    pc0 <- pc0 + dbr
+                    pc1 <- pc1 + dbr
+
+
+                    for _ in i.. rows - 1 do
                         let a = NativeInt.read<float> pc0 //B.[r0,ci]
                         let b = NativeInt.read<float> pc1 //B.[r1,ci]
                         NativeInt.write pc0 ( cos * a + sin * b )
