@@ -131,6 +131,8 @@ module QR =
         let U = identity rows rows
         let Vt = identity cols cols
 
+        let inline sgn v = if v < 0.0 then -1.0 else 1.0
+
         for i in 0 .. cols - 1 do
             // wiki performs this loop backwards (should not really matter)
             let c = i
@@ -143,7 +145,7 @@ module QR =
                 if not (tiny eps vrc) then
 
                     // find givens rotation
-                    let rho = float (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
+                    let rho = float (sgn vcc) * sqrt (vcc * vcc + vrc * vrc)
                     let cos = vcc / rho
                     let sin = vrc / rho
                     
@@ -167,7 +169,7 @@ module QR =
                 if not (tiny eps vrc) then
 
                     // find givens rotation
-                    let rho = if vcc = 0.0 then abs vrc else float (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
+                    let rho = if vcc = 0.0 then abs vrc else sgn vcc * sqrt (vcc * vcc + vrc * vrc)
                     let sin = vrc / rho
                     let cos = vcc / rho
 
@@ -489,9 +491,11 @@ module QR =
         let n = B.GetLength(0)
         let m = B.GetLength(1)
         
+
+
         let anorm =
             let mutable maxNorm = 0.0
-            for r in 0..n-1 do
+            for r in 0..m-1 do
                 maxNorm <- max maxNorm (abs B.[r,r] + (if r = 0 then 0.0 else abs B.[r-1,r]))
             maxNorm
 
@@ -516,7 +520,7 @@ module QR =
         let mutable y = 0.0
         let mutable z = 0.0
 
-        for k in n - 1 .. -1 .. 0 do 
+        for k in m - 1 .. -1 .. 0 do 
             let mutable conv = false
             let mutable iterations = 0
             while not conv && iterations <= 30 do
@@ -567,8 +571,6 @@ module QR =
                     
                     conv <- true
                 else
-                    printfn "..."
-                    print B
 
                     if (iterations >= 30) then
                         failwith "no convergence after 30 iterations"
@@ -602,7 +604,7 @@ module QR =
                         g <- g * c - x * s
                         h <- y * s
                         y <- y * c
-                        for jj in 0 .. n - 1 do
+                        for jj in 0 .. m - 1 do
                             let x = Vt.[j, jj]
                             let z = Vt.[i, jj]
                             Vt.[j, jj] <- x * c + z * s
@@ -619,7 +621,7 @@ module QR =
                         f <- (c * g) + (s * y)
                         x <- (c * y) - (s * g)
 
-                        for jj in 0 .. m-1 do
+                        for jj in 0 .. n-1 do
                             let y = U.[jj, j]
                             let z = U.[jj, i]
                             U.[jj, j] <- y * c + z * s
@@ -638,7 +640,7 @@ module QR =
         let mutable values = MapExt.empty
         let cmp = System.Func<_,_,_>(fun (_,l) (_,r) -> compare r l) 
         let heap = System.Collections.Generic.List<int * float>()
-        for i in 0 .. n - 1 do
+        for i in 0 .. m - 1 do
             let v = abs B.[i,i]
             values <- 
                 MapExt.alter v (fun o ->
@@ -649,7 +651,7 @@ module QR =
 
 
 
-        for i0 in 0..n-1 do
+        for i0 in 0..m-1 do
             let biggestIdx =
                 let (key, indices) = MapExt.tryItem (values.Count - 1) values |> Option.get
                 match indices with
@@ -673,9 +675,9 @@ module QR =
                     ) values
 
     
-        for i0 in 0..n-2 do
+        for i0 in 0..m-2 do
             if B.[i0,i0] < 0.0 then
-                let i1 = n-1
+                let i1 = m-1
                 B.[i0,i0] <- -B.[i0,i0]
                 B.[i1,i1] <- -B.[i1,i1]
                 //applyGivens U i0 i1 -1.0 0.0
@@ -683,7 +685,32 @@ module QR =
                 
 
         U, B, Vt
+        
+    let transpose (A : float[,]) =
+        let r = A.GetLength(1)
+        let c = A.GetLength(0)
+            
+        Array2D.init r c (fun r c ->
+            A.[c,r]
+        )
 
+    let svd (m : float[,]) =
+        let rows = m.GetLength(0)
+        let cols = m.GetLength(1)
+        let m, isTransposed =
+            if rows >= cols then
+                m, false
+            else
+                transpose m, true
+
+        let (U,B,Vt) = bidiagonalize 1E-20 m
+
+        let (U,B,Vt) = svdBidiagonal U B Vt
+
+        if isTransposed then
+            transpose Vt, transpose B, transpose U
+        else
+            U, B, Vt
 
     let decomposeNative32 (eps : float32) (pQ : NativeMatrix<float32>) (pR : NativeMatrix<float32>) =
         let rows = int pR.SY
@@ -1186,7 +1213,7 @@ module QRTest =
 
         valid
         
-    let errorMetrics (iter : int) =
+    let errorMetrics (reconstruct : float[,] -> float[,]) (iter : int) =
         let buckets = SortedDictionary<int, ref<float * int>>()
 
         let add (value : float) =
@@ -1209,28 +1236,28 @@ module QRTest =
         for i in 1 .. iter do
             if not error then
                 let mat = if rand.NextDouble() > 0.1 then random() else randomSpecial()
-                let Q, R = QR.decomposeMat 1.0E-20 (Matrix.ofArray mat)
-                let Q = Matrix.toArray Q
-                let R = Matrix.toArray R
+                //let Q, R = QR.decomposeMat 1.0E-20 (Matrix.ofArray mat)
+                //let Q = Matrix.toArray Q
+                //let R = Matrix.toArray R
 
 
-                let (min, max, avg) = rightUpper R
-                if max > tolerance then 
-                    printfn "not right upper: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
-                    print R
-                    printfn "input"
-                    print mat
-                    error <- true
+                //let (min, max, avg) = rightUpper R
+                //if max > tolerance then 
+                //    printfn "not right upper: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
+                //    print R
+                //    printfn "input"
+                //    print mat
+                //    error <- true
 
-                let (min, max, avg) = distanceMinMaxAvg (mul Q (transpose Q)) (identity (Q.GetLength(0)) (Q.GetLength(1)))
-                if max > tolerance then 
-                    printfn "not ortho: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (Q.GetLength(0)) (Q.GetLength(1)) min max avg
-                    print Q
-                    printfn "Q * Qt"
-                    print (mul Q (transpose Q))
-                    error <- true
+                //let (min, max, avg) = distanceMinMaxAvg (mul Q (transpose Q)) (identity (Q.GetLength(0)) (Q.GetLength(1)))
+                //if max > tolerance then 
+                //    printfn "not ortho: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (Q.GetLength(0)) (Q.GetLength(1)) min max avg
+                //    print Q
+                //    printfn "Q * Qt"
+                //    print (mul Q (transpose Q))
+                //    error <- true
 
-                let test = mul Q R
+                let test = reconstruct mat
                 let (min, max, avg) = distanceMinMaxAvg mat test
                 printfn "valid: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
                 add max
@@ -1346,50 +1373,40 @@ module QRTest =
         print R
         
     open Aardvark.VRVis
+
+
+
     let bidiag() =
-        let rows = 6
-        let cols = 6
+        let reconstruct (m : float[,]) =
+            let (U,S,Vt) = QR.svd m
+
+            for r in 0 .. S.GetLength(0) - 1 do
+                for c in 0 .. S.GetLength(1) - 1 do
+                    if r <> c then
+                        S.[r,c] <- 0.0
+
+            mul U (mul S Vt)
+        
+        errorMetrics reconstruct 1000
+
+        let rows = rand.Next(14)+2
+        let cols = rand.Next(14)+2
         
         let m = 
             Array2D.init rows cols (fun r c ->
                 rand.NextDouble() * 20.0 - 10.0
             )
             
-        let svd = (Matrix.ofArray m).SVD()
+        let (U,S,Vt) = QR.svd m
 
-        let Ua = Matrix.toArray svd.U
-        let Wa = svd.W.Array
-        let Va = Matrix.toArray svd.V
-
-        let (U,B,Vt) = QR.bidiagonalize 1E-20 m
-
-        let test = mul U (mul B Vt)
-        printfn "Bidiag-test: %A" <| distanceMinMaxAvg test m
-        printfn "Bidiag"
-        print B
-
-        let (U,B,Vt) = QR.svdBidiagonal U B Vt
-        let test = mul U (mul B Vt)
-        printfn "%A" <| distanceMinMaxAvg test m
+        let test = mul U (mul S Vt)
         
-        //printfn "raute"
-        //printfn "Ua"
-        //print Ua
-        //printfn "Ba"
-        //printfn "%A" Wa
-        //printfn "Va"
-        //print Va
-
-        printfn "fsharp"
         printfn "U"
         print U
-        printfn "B"
-        print B
+        printfn "S"
+        print S
         printfn "Vt"
         print Vt
-        printfn "det(U) = %A" (determinant U)
-        printfn "det(V) = %A" (determinant Vt)
+        printfn "%A" <| distanceMinMaxAvg test m
         ()
-        //printfn "Vt"
-        //print Vt
         
