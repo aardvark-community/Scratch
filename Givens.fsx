@@ -13,6 +13,12 @@ module QR =
 
     [<AutoOpen>]
     module private Helpers = 
+        
+        type NativeMatrix<'a when 'a : unmanaged> with
+            member inline x.Transposed = NativeMatrix<'a>(x.Pointer, x.Info.Transposed)
+
+        let inline sgn v = if v < 0.0 then -1.0 else 1.0
+
         let inline tiny (eps : 'a) (v : 'a) =
             abs v <= eps
         
@@ -67,6 +73,24 @@ module QR =
 
                 p0 <- p0 + drQ
                 p1 <- p1 + drQ
+                
+        let inline applyGivensTransposedMat (mat : NativeMatrix<float>) (c : int) (r : int) (cos : float) (sin : float) =
+            let ptrQ = NativePtr.toNativeInt mat.Pointer
+            let dcQ = nativeint sizeof<float> * nativeint mat.DX
+            let drQ = nativeint sizeof<float> * nativeint mat.DY
+            let rows = int mat.SY
+
+            let mutable p0 = ptrQ + nativeint c * drQ 
+            let mutable p1 = ptrQ + nativeint r * drQ      
+            // adjust affected elements
+            for ri in 0 .. rows - 1 do
+                let A = NativeInt.read<float> p0
+                let B = NativeInt.read<float> p1
+                NativeInt.write p0 ( cos * A + sin * B )
+                NativeInt.write p1 (-sin * A + cos * B )
+
+                p0 <- p0 + dcQ
+                p1 <- p1 + dcQ
 
         let inline applyGivensMat32 (mat : NativeMatrix<float32>) (c : int) (r : int) (cos : float32) (sin : float32) =
             let ptrQ = NativePtr.toNativeInt mat.Pointer
@@ -122,6 +146,141 @@ module QR =
 
         Q, R
 
+    /// creates a (in-place) decomposition B = U * B' * Vt where
+    /// U and V a orthonormal rotations and B' is upper bidiagonal
+    /// returns the "anorm" of the resulting B matrix
+    let internal bidiagonalizeNative (U : NativeMatrix<float>) (B : NativeMatrix<float>) (Vt : NativeMatrix<float>) =
+        let rows = int B.SY
+        let cols = int B.SX
+
+        // set u and v to identity
+        U.SetByCoord(fun (v : V2i) -> if v.X = v.Y then 1.0 else 0.0)
+        Vt.SetByCoord(fun (v : V2i) -> if v.X = v.Y then 1.0 else 0.0)
+        
+        let sa = nativeint sizeof<float>
+        let pB = NativePtr.toNativeInt B.Pointer
+        let dbr = nativeint B.DY * sa
+        let dbc = nativeint B.DX * sa
+        
+        let mutable anorm = 0.0
+
+        let mutable pii = pB
+        for i in 0 .. cols - 1 do
+
+            // make the subdiagonal column 0
+            let mutable pi1i = pii + dbr
+            for j in i + 1 .. rows - 1 do
+                let vcc = NativeInt.read<float> pii     //B.[i,i]
+                let vrc = NativeInt.read<float> pi1i    //B.[j,i]
+
+                // if the dst-element is not already zero then make it zero
+                if not (Fun.IsTiny vrc) then
+
+                    // find givens rotation
+                    let rho = sgn vcc * sqrt (vcc * vcc + vrc * vrc)
+                    let cos = vcc / rho
+                    let sin = vrc / rho
+                    
+                    // adjust affected elements
+                    let mutable pr0 = pii 
+                    let mutable pr1 = pi1i
+
+                    // first iteration
+                    let a = NativeInt.read<float> pr0 //B.[r0,ci]
+                    let b = NativeInt.read<float> pr1 //B.[r1,ci]
+                    NativeInt.write pr0 ( cos * a + sin * b )
+                    NativeInt.write pr1 0.0
+                    pr1 <- pr1 + dbc
+                    pr0 <- pr0 + dbc
+
+                    for _ in i + 1 .. cols - 1 do
+                        let a = NativeInt.read<float> pr0 //B.[r0,ci]
+                        let b = NativeInt.read<float> pr1 //B.[r1,ci]
+                        NativeInt.write pr0 ( cos * a + sin * b )
+                        NativeInt.write pr1 (-sin * a + cos * b )
+                        pr1 <- pr1 + dbc
+                        pr0 <- pr0 + dbc
+
+                    // adjust the resulting U matrix
+                    applyGivensMat U i j cos sin
+                    
+                pi1i <- pi1i + dbr
+
+                
+            // step one to the right
+            pii <- pii + dbc
+            let i = i + 1
+            let mutable pij = pii + dbc
+            
+            // make the 2nd superdiagonal row 0
+            for j in i + 1 .. cols - 1 do
+                let vcc = NativeInt.read<float> pii     //B.[i,i+1] // important since R.[c,c] changes
+                let vrc = NativeInt.read<float> pij     //B.[i,j]
+
+                // if the dst-element is not already zero then make it zero
+                if not (Fun.IsTiny vrc) then
+
+                    // find givens rotation
+                    let rho = if vcc = 0.0 then abs vrc else sgn vcc * sqrt (vcc * vcc + vrc * vrc)
+                    let sin = vrc / rho
+                    let cos = vcc / rho
+                    
+                    // adjust affected elements
+                    let mutable pc0 = pii
+                    let mutable pc1 = pij
+                    
+                    // first iteration
+                    let a = NativeInt.read<float> pc0 //B.[r0,ci]
+                    let b = NativeInt.read<float> pc1 //B.[r1,ci]
+                    NativeInt.write pc0 ( cos * a + sin * b )
+                    NativeInt.write pc1 0.0
+                    pc0 <- pc0 + dbr
+                    pc1 <- pc1 + dbr
+
+
+                    for _ in i.. rows - 1 do
+                        let a = NativeInt.read<float> pc0 //B.[r0,ci]
+                        let b = NativeInt.read<float> pc1 //B.[r1,ci]
+                        NativeInt.write pc0 ( cos * a + sin * b )
+                        NativeInt.write pc1 (-sin * a + cos * b )
+                        pc0 <- pc0 + dbr
+                        pc1 <- pc1 + dbr
+                        
+                    // adjust the resulting Vt matrix
+                    applyGivensTransposedMat Vt i j cos sin
+                    
+                pij <- pij + dbc
+                
+            let normv = 
+                if i > 0 then 
+                    // abs B.[i-1,i] + abs B.[i,i]
+                    abs (NativeInt.read<float> (pii - dbc - dbr)) + abs (NativeInt.read<float> (pii - dbc))
+                else 
+                    // abs B.[i,i]
+                    abs (NativeInt.read<float> (pii - dbc))
+
+            anorm <- max anorm normv
+            pii <- pii + dbr
+
+        anorm
+
+    let internal svdBidiagonalNative (anorm : float) (U : NativeMatrix<float>) (B : NativeMatrix<float>) (Vt : NativeMatrix<float>) : unit =
+        failwith "not implemented"
+
+    let svdNative (U : NativeMatrix<float>) (B : NativeMatrix<float>) (Vt : NativeMatrix<float>) =
+        if B.SX <= B.SY then
+            let anorm = bidiagonalizeNative U B Vt
+            svdBidiagonalNative anorm U B Vt
+        else
+            // B = U * B' * Vt
+            // Bt = V * Bt' * Ut
+            let Ut = U.Transposed
+            let V = Ut.Transposed
+            let Bt = B.Transposed
+            let anorm = bidiagonalizeNative V Bt Ut
+            svdBidiagonalNative anorm V Bt Ut
+
+
 
     let bidiagonalize (eps : float) (mat : float[,]) =
         let rows = mat.GetLength(0)
@@ -130,8 +289,6 @@ module QR =
         let B = Array2D.copy mat
         let U = identity rows rows
         let Vt = identity cols cols
-
-        let inline sgn v = if v < 0.0 then -1.0 else 1.0
 
         for i in 0 .. cols - 1 do
             // wiki performs this loop backwards (should not really matter)
@@ -145,7 +302,7 @@ module QR =
                 if not (tiny eps vrc) then
 
                     // find givens rotation
-                    let rho = float (sgn vcc) * sqrt (vcc * vcc + vrc * vrc)
+                    let rho = float (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
                     let cos = vcc / rho
                     let sin = vrc / rho
                     
@@ -169,7 +326,7 @@ module QR =
                 if not (tiny eps vrc) then
 
                     // find givens rotation
-                    let rho = if vcc = 0.0 then abs vrc else sgn vcc * sqrt (vcc * vcc + vrc * vrc)
+                    let rho = if vcc = 0.0 then abs vrc else float (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
                     let sin = vrc / rho
                     let cos = vcc / rho
 
@@ -227,209 +384,7 @@ module QR =
     let print (m : float[,]) =
         m |> Array2D.map (sprintf "%.3f") |> printTable false
 
-    //let svdBidiagonal (eps : float) (U : float[,]) (mat : float[,]) (Vt : float[,]) =
-    //    let rows = mat.GetLength(0)
-    //    let cols = mat.GetLength(1)
-    //    if cols < 2 then
-    //        failwith "think"
-    //    else
-
-    //        let U = Array2D.copy U
-    //        let B = Array2D.copy mat
-    //        let Vt = Array2D.copy Vt
-
-    //        let inline sgn v = if v < 0.0 then -1.0 else 1.0
-
-    //        /// wilkinson shift for symmetric 2x2 matrix
-    //        /// | a | b |
-    //        /// | b | c |
-    //        let wilkinson (a : float) (b : float) (c : float) =
-    //            if tiny eps b then
-    //                c
-    //            else
-    //                let s = (a - c) / 2.0
-    //                c - (sgn s * b * b) / (abs s + sqrt (s*s + b*b))
-
-    //        let size = min cols rows
-
-    //        let mutable lastErr = System.Double.PositiveInfinity
-    //        let mutable err = System.Double.MaxValue
-    //        let mutable iter = 0
-    //        while lastErr <> err do
-    //            // https://web.stanford.edu/class/cme335/lecture6.pdf
-    //            // http://www.math.cornell.edu/~web6140/TopTenAlgorithms/QRalgorithm.html
-
-    //            // Step 1
-    //            // find wilkinson shift for T = Bt * B (symmetric tridiagonal)
-    //            // T € cols x cols
-    //            // tij = sum 0 (rows-1) (fun x -> Bt.[i,x] * B.[x,j])
-    //            // tij = sum 0 (rows-1) (fun x -> B.[x,i] * B.[x,j])
-
-    //            // bidiagonal
-    //            // i > j        -> B.[i,j] = 0
-    //            // i < j - 1    -> B.[i,j] = 0
-
-    //            // i = j
-    //            // tii = sum 0 rows (fun x -> B.[x,i] * B.[x,i])
-    //            // tii = B.[i,i]^2 + B.[i,i+1]*B.[i,i+1]
-
-    //            // i < j
-    //            // tij = sum 0 rows (fun x -> B.[x,i] * B.[x,j])
-
-    //            let my =
-    //                if rows < cols then
-    //                    let f1 = B.[rows-2, rows-1]
-    //                    let d2 = B.[rows-1, rows-1]
-    //                    let f2 = B.[rows-1, rows]
-
-    //                    let t00 = f1*f1 + d2*d2
-    //                    let t10 = d2*f2
-    //                    let t11 = f2*f2
-
-    //                    wilkinson t00  t10 t11
-    //                else
-    //                    let f0 = B.[cols-3, cols-2]
-    //                    let d1 = B.[cols-2, cols-2]
-    //                    let f1 = B.[cols-2, cols-1]
-    //                    let d2 = B.[cols-1, cols-1]
-
-    //                    let t00 = f0*f0 + d1*d1
-    //                    let t10 = d1*f1
-    //                    let t11 = f1*f1 + d2*d2
-
-    //                    wilkinson t00 t10 t11
-
-    //            //B.[rows - 1
-                
-    //            for k in 
-    //            let mutable rs = min rows (cols - 1) - 1
-
-    //            while rs >= 0 && tiny 1E-8 B.[rs,rs + 1] do
-    //                rs <- rs - 1
-
-    //            //printfn "start: %A" rs
-    //            if rs > 0 then
-    //                let t00 = 
-    //                    if rs > 0 then B.[rs-1,rs] * B.[rs-1, rs] + B.[rs,rs] * B.[rs,rs]
-    //                    else B.[rs,rs] * B.[rs,rs]
-
-    //                let t10 = B.[rs,rs] * B.[rs,rs+1]
-
-    //                let y = B.[rs-1,rs-1]
-    //                let g = B.[rs-1,rs]
-    //                let h = B.[rs,rs]
-    //                let f = ((y - z) * (y + z) + (g - h) * (g + h)) / (2.0 * h * y)
-    //                let g = Fun.Pythag(f, 1.0)
-    //                let f = ((x - z) * (x + z) + h * ((y / (f + ((f >= 0.0) ? abs(g) : -abs(g)))) - h)) / x
-
-    //                // shift T to T - my*I
-    //                let ts00 = B.[rs,rs] //t00 - my
-    //                let ts10 = B.[rs,rs+1] //t10
-                
-    //                // Step 2
-    //                if not (tiny eps ts10) then
-    //                    // find givens rotation for shifted T
-    //                    let rho = sgn ts00 * sqrt (ts00 * ts00 + ts10 * ts10)
-    //                    let cos = ts00 / rho
-    //                    let sin = ts10 / rho
-                    
-    //                    // adjust affected elements
-    //                    for ri in 0 .. rows - 1 do
-    //                        let a = B.[ri,rs]
-    //                        let b = B.[ri,rs+1]
-    //                        B.[ri,rs] <-    cos * a + sin * b
-    //                        B.[ri,rs+1] <- -sin * a + cos * b
-
-    //                    applyGivensTransposed Vt rs (rs+1) cos sin
-
-    //                // Step 3
-    //                let mutable br = rs+1
-    //                let mutable bc = rs
-
-
-    //                while br < rows && bc < cols do
-    //                    let r0 = br - 1
-    //                    let r1 = br
-                    
-             
-    //                    let v0 = B.[r0, bc]
-    //                    let v1 = B.[r1, bc]
-    //                    if not (tiny eps v1) then
-
-    //                        // find givens rotation
-    //                        let rho = sgn v0 * sqrt (v0 * v0 + v1 * v1)
-    //                        let cos = v0 / rho
-    //                        let sin = v1 / rho
-                    
-    //                        // adjust affected elements
-    //                        for ci in 0 .. cols - 1 do
-    //                            let a = B.[r0,ci]
-    //                            let b = B.[r1,ci]
-    //                            B.[r0,ci] <-  cos * a + sin * b
-    //                            B.[r1,ci] <- -sin * a + cos * b
-                        
-    //                        applyGivens U r0 r1 cos sin
-                    
-    //                    let c0 = r0 + 1
-    //                    let c1 = r0 + 2
-    //                    if c1 < cols then
-    //                        let v0 = B.[r0, c0]
-    //                        let v1 = B.[r0, c1]
-    //                        if not (tiny eps v1) then
-    //                            // find givens rotation
-    //                            let rho = sgn v0 * sqrt (v0 * v0 + v1 * v1)
-    //                            let cos = v0 / rho
-    //                            let sin = v1 / rho
-
-    //                            // adjust affected elements
-    //                            for ri in 0 .. rows - 1 do
-    //                                let a = B.[ri, c0]
-    //                                let b = B.[ri, c1]
-    //                                B.[ri,c0] <-  cos * a + sin * b
-    //                                B.[ri,c1] <- -sin * a + cos * b
-                        
-    //                            applyGivensTransposed Vt c0 c1 cos sin
-
-    //                    //br <- rows
-    //                    br <- br + 1
-    //                    bc <- bc + 1
-                    
-    //                let mutable e = 0.0
-    //                for r in 0 .. rows - 1 do
-    //                    if r < cols - 1 then
-    //                        let v = B.[r, r+1]
-    //                        if tiny eps v then
-    //                            printfn "tiny"
-    //                        e <- max e (abs v)
-
-    //                lastErr <- err
-    //                err <- e
-    //                iter <- iter + 1
-
-    //                printfn "%d: %.3e" iter err
-
-    //            //printfn "B"
-    //            //print B
-             
-
-
-
-
-    //            // T = Bt * B
-    //            // T € cols * cols
-                
-    //            // let t r c = sum 0 (rows-1) (fun k -> Bt.[r, k] * B.[k, c])
-    //            // let t r c = sum 0 (rows-1) (fun k -> B.[k, r] * B.[k, c])
-
-    //            // wlog: r <= c
-    //            // let t r c = sum r (rows-1) (fun k -> B.[k, r] * B.[k, c])
-                
-                
-
-    //        U, B, Vt, err
-
-        
-    
+ 
 
     let decomposeNative (eps : float) (pQ : NativeMatrix<float>) (pR : NativeMatrix<float>) =
         let rows = int pR.SY
@@ -491,11 +446,9 @@ module QR =
         let n = B.GetLength(0)
         let m = B.GetLength(1)
         
-
-
         let anorm =
             let mutable maxNorm = 0.0
-            for r in 0..m-1 do
+            for r in 0..n-1 do
                 maxNorm <- max maxNorm (abs B.[r,r] + (if r = 0 then 0.0 else abs B.[r-1,r]))
             maxNorm
 
@@ -520,7 +473,7 @@ module QR =
         let mutable y = 0.0
         let mutable z = 0.0
 
-        for k in m - 1 .. -1 .. 0 do 
+        for k in n - 1 .. -1 .. 0 do 
             let mutable conv = false
             let mutable iterations = 0
             while not conv && iterations <= 30 do
@@ -561,14 +514,6 @@ module QR =
                             
                 z <- B.[k,k] 
                 if l = k then
-                    // TODO!!!!!
-                    //if z < 0.0 then // make singular value nonnegative
-                    //{
-                    //    w[k] = -z;
-                    //    for (j = 0; j < n; j++)
-                    //        v[k, j] = -v[k, j];
-                    //}
-                    
                     conv <- true
                 else
 
@@ -604,7 +549,7 @@ module QR =
                         g <- g * c - x * s
                         h <- y * s
                         y <- y * c
-                        for jj in 0 .. m - 1 do
+                        for jj in 0 .. n - 1 do
                             let x = Vt.[j, jj]
                             let z = Vt.[i, jj]
                             Vt.[j, jj] <- x * c + z * s
@@ -621,7 +566,7 @@ module QR =
                         f <- (c * g) + (s * y)
                         x <- (c * y) - (s * g)
 
-                        for jj in 0 .. n-1 do
+                        for jj in 0 .. m-1 do
                             let y = U.[jj, j]
                             let z = U.[jj, i]
                             U.[jj, j] <- y * c + z * s
@@ -640,7 +585,7 @@ module QR =
         let mutable values = MapExt.empty
         let cmp = System.Func<_,_,_>(fun (_,l) (_,r) -> compare r l) 
         let heap = System.Collections.Generic.List<int * float>()
-        for i in 0 .. m - 1 do
+        for i in 0 .. n - 1 do
             let v = abs B.[i,i]
             values <- 
                 MapExt.alter v (fun o ->
@@ -651,7 +596,7 @@ module QR =
 
 
 
-        for i0 in 0..m-1 do
+        for i0 in 0..n-1 do
             let biggestIdx =
                 let (key, indices) = MapExt.tryItem (values.Count - 1) values |> Option.get
                 match indices with
@@ -675,9 +620,9 @@ module QR =
                     ) values
 
     
-        for i0 in 0..m-2 do
+        for i0 in 0..n-2 do
             if B.[i0,i0] < 0.0 then
-                let i1 = m-1
+                let i1 = n-1
                 B.[i0,i0] <- -B.[i0,i0]
                 B.[i1,i1] <- -B.[i1,i1]
                 //applyGivens U i0 i1 -1.0 0.0
@@ -685,32 +630,7 @@ module QR =
                 
 
         U, B, Vt
-        
-    let transpose (A : float[,]) =
-        let r = A.GetLength(1)
-        let c = A.GetLength(0)
-            
-        Array2D.init r c (fun r c ->
-            A.[c,r]
-        )
 
-    let svd (m : float[,]) =
-        let rows = m.GetLength(0)
-        let cols = m.GetLength(1)
-        let m, isTransposed =
-            if rows >= cols then
-                m, false
-            else
-                transpose m, true
-
-        let (U,B,Vt) = bidiagonalize 1E-20 m
-
-        let (U,B,Vt) = svdBidiagonal U B Vt
-
-        if isTransposed then
-            transpose Vt, transpose B, transpose U
-        else
-            U, B, Vt
 
     let decomposeNative32 (eps : float32) (pQ : NativeMatrix<float32>) (pR : NativeMatrix<float32>) =
         let rows = int pR.SY
@@ -1213,7 +1133,7 @@ module QRTest =
 
         valid
         
-    let errorMetrics (reconstruct : float[,] -> float[,]) (iter : int) =
+    let errorMetrics (iter : int) =
         let buckets = SortedDictionary<int, ref<float * int>>()
 
         let add (value : float) =
@@ -1236,28 +1156,28 @@ module QRTest =
         for i in 1 .. iter do
             if not error then
                 let mat = if rand.NextDouble() > 0.1 then random() else randomSpecial()
-                //let Q, R = QR.decomposeMat 1.0E-20 (Matrix.ofArray mat)
-                //let Q = Matrix.toArray Q
-                //let R = Matrix.toArray R
+                let Q, R = QR.decomposeMat 1.0E-20 (Matrix.ofArray mat)
+                let Q = Matrix.toArray Q
+                let R = Matrix.toArray R
 
 
-                //let (min, max, avg) = rightUpper R
-                //if max > tolerance then 
-                //    printfn "not right upper: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
-                //    print R
-                //    printfn "input"
-                //    print mat
-                //    error <- true
+                let (min, max, avg) = rightUpper R
+                if max > tolerance then 
+                    printfn "not right upper: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
+                    print R
+                    printfn "input"
+                    print mat
+                    error <- true
 
-                //let (min, max, avg) = distanceMinMaxAvg (mul Q (transpose Q)) (identity (Q.GetLength(0)) (Q.GetLength(1)))
-                //if max > tolerance then 
-                //    printfn "not ortho: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (Q.GetLength(0)) (Q.GetLength(1)) min max avg
-                //    print Q
-                //    printfn "Q * Qt"
-                //    print (mul Q (transpose Q))
-                //    error <- true
+                let (min, max, avg) = distanceMinMaxAvg (mul Q (transpose Q)) (identity (Q.GetLength(0)) (Q.GetLength(1)))
+                if max > tolerance then 
+                    printfn "not ortho: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (Q.GetLength(0)) (Q.GetLength(1)) min max avg
+                    print Q
+                    printfn "Q * Qt"
+                    print (mul Q (transpose Q))
+                    error <- true
 
-                let test = reconstruct mat
+                let test = mul Q R
                 let (min, max, avg) = distanceMinMaxAvg mat test
                 printfn "valid: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
                 add max
@@ -1373,40 +1293,66 @@ module QRTest =
         print R
         
     open Aardvark.VRVis
-
-
-
     let bidiag() =
-        let reconstruct (m : float[,]) =
-            let (U,S,Vt) = QR.svd m
-
-            for r in 0 .. S.GetLength(0) - 1 do
-                for c in 0 .. S.GetLength(1) - 1 do
-                    if r <> c then
-                        S.[r,c] <- 0.0
-
-            mul U (mul S Vt)
-        
-        errorMetrics reconstruct 1000
-
-        let rows = rand.Next(14)+2
-        let cols = rand.Next(14)+2
+        let rows = 6
+        let cols = 6
         
         let m = 
             Array2D.init rows cols (fun r c ->
                 rand.NextDouble() * 20.0 - 10.0
             )
             
-        let (U,S,Vt) = QR.svd m
+        let svd = (Matrix.ofArray m).SVD()
 
-        let test = mul U (mul S Vt)
+        let Ua = Matrix.toArray svd.U
+        let Wa = svd.W.Array
+        let Va = Matrix.toArray svd.V
+
+
+        let (U, B, Vt,anorm) =
+            let m = Matrix.ofArray m
+            let u = Matrix(int64 cols, int64 cols)
+            let vt = Matrix(int64 rows, int64 rows)
+            let anorm = 
+                NativeMatrix.using m (fun pm ->
+                    NativeMatrix.using u (fun pu ->
+                        NativeMatrix.using vt (fun pvt ->
+                            QR.bidiagonalizeNative pu pm pvt
+                        )
+                    )
+                )
+            Matrix.toArray u, Matrix.toArray m, Matrix.toArray vt, anorm
+
+
+        //let (U,B,Vt) = QR.bidiagonalize 1E-20 m
+
+        let test = mul U (mul B Vt)
+        printfn "Bidiag-test: %A" <| distanceMinMaxAvg test m
+        printfn "Bidiag: %.3f" anorm
+        print B
+
+        //let (U,B,Vt) = QR.svdBidiagonal U B Vt
+        //let test = mul U (mul B Vt)
+        //printfn "%A" <| distanceMinMaxAvg test m
         
-        printfn "U"
-        print U
-        printfn "S"
-        print S
-        printfn "Vt"
-        print Vt
-        printfn "%A" <| distanceMinMaxAvg test m
+        ////printfn "raute"
+        ////printfn "Ua"
+        ////print Ua
+        ////printfn "Ba"
+        ////printfn "%A" Wa
+        ////printfn "Va"
+        ////print Va
+
+        //printfn "fsharp"
+        //printfn "U"
+        //print U
+        //printfn "B"
+        //print B
+        //printfn "Vt"
+        //print Vt
+        //printfn "det(U) = %A" (determinant U)
+        //printfn "det(V) = %A" (determinant Vt)
         ()
+        //printfn "Vt"
+        //print Vt
         
