@@ -1,19 +1,118 @@
 #r @"netstandard.dll"
 #load @".paket\load\main.group.fsx"
+#r "SVD.dll"
 
 open System.Runtime.CompilerServices
 open Microsoft.FSharp.NativeInterop
 open Aardvark.Base
+open Aardvark.VRVis
 open Aardvark.Base.Sorting
 #nowarn "9"
 #nowarn "51"
+#nowarn "4321"
+
+module NativeMatrix =
+    open System.Runtime.InteropServices
+    
+    [<CompilerMessage("internal use only: use NativeMatrix.using instead", 4321, IsHidden = true)>]
+    type Pinning private() =
+        static member Using(m : M22d, f : NativeMatrix<float> -> 'r) =
+            let mutable r = m
+            let native =
+                NativeMatrix<float>(
+                    NativePtr.cast &&r,
+                    MatrixInfo(
+                        0L,
+                        V2l(2,2),
+                        V2l(1,2)
+                    )
+                )
+            f native
+                
+        static member Using(m : M23d, f : NativeMatrix<float> -> 'r) =
+            let mutable r = m
+            let native =
+                NativeMatrix<float>(
+                    NativePtr.cast &&r,
+                    MatrixInfo(
+                        0L,
+                        V2l(3,2),
+                        V2l(1,3)
+                    )
+                )
+            f native
+                
+        static member Using(m : M33d, f : NativeMatrix<float> -> 'r) =
+            let mutable r = m
+            let native =
+                NativeMatrix<float>(
+                    NativePtr.cast &&r,
+                    MatrixInfo(
+                        0L,
+                        V2l(3,3),
+                        V2l(1,3)
+                    )
+                )
+            f native
+            
+        static member Using(m : M34d, f : NativeMatrix<float> -> 'r) =
+            let mutable r = m
+            let native =
+                NativeMatrix<float>(
+                    NativePtr.cast &&r,
+                    MatrixInfo(
+                        0L,
+                        V2l(3,4),
+                        V2l(1,4)
+                    )
+                )
+            f native
+
+        static member Using(m : M44d, f : NativeMatrix<float> -> 'r) =
+            let mutable r = m
+            let native =
+                NativeMatrix<float>(
+                    NativePtr.cast &&r,
+                    MatrixInfo(
+                        0L,
+                        V2l(4,4),
+                        V2l(1,4)
+                    )
+                )
+            f native
+            
+        static member Using(m : float[,], f : NativeMatrix<float> -> 'r) =
+            let gc = GCHandle.Alloc(m, GCHandleType.Pinned)
+            try
+                let rows = m.GetLength(0)
+                let cols = m.GetLength(1)
+                let native =
+                    NativeMatrix<float>(
+                        NativePtr.ofNativeInt (gc.AddrOfPinnedObject()),
+                        MatrixInfo(
+                            0L,
+                            V2l(cols,rows),
+                            V2l(1,cols)
+                        )
+                    )
+                f native
+            finally
+                gc.Free()
+                
+        static member Using(m : Matrix<float>, f : NativeMatrix<float> -> 'r) =
+            NativeMatrix.using m f
+
+    [<CompilerMessage("internal use only: use NativeMatrix.using instead", 4321, IsHidden = true)>]
+    let inline usingDummy< ^a, ^b, ^c, ^r when ^c : unmanaged and (^a or ^b) : (static member Using : ^a * (NativeMatrix< ^c > -> ^r) -> ^r) > (b : ^b) (a : ^a) (f : NativeMatrix< ^c > -> ^r) =
+        ((^a or ^b) : (static member Using : ^a * (NativeMatrix< ^c > -> ^r) -> ^r) (a, f))
+
+    let inline using a f =
+        usingDummy Unchecked.defaultof<Pinning> a f
 
 module QR =
-    open System.Web.UI.WebControls
 
     [<AutoOpen>]
     module private Helpers = 
-        
         type NativeMatrix<'a when 'a : unmanaged> with
             member inline x.Transposed = NativeMatrix<'a>(x.Pointer, x.Info.Transposed)
 
@@ -36,33 +135,33 @@ module QR =
             )
 
         let applyGivens (mat : float[,]) (c : int) (r : int) (cos : float) (sin : float) =
-            let cols = mat.GetLength(0)
-            // adjust affected elements
-            for ci in 0 .. cols - 1 do
-                let A = mat.[ci, c]
-                let B = mat.[ci, r]
-                mat.[ci, c] <-  cos * A + sin * B
-                mat.[ci, r] <- -sin * A + cos * B
-
-        let applyGivensTransposed (mat : float[,]) (c : int) (r : int) (cos : float) (sin : float) =
-            let rows = mat.GetLength(1)
+            let rows = mat.GetLength(0)
             // adjust affected elements
             for ri in 0 .. rows - 1 do
-                let A = mat.[c, ri]
-                let B = mat.[r, ri]
-                mat.[c, ri] <-  cos * A + sin * B
-                mat.[r, ri] <- -sin * A + cos * B
+                let A = mat.[ri, c]
+                let B = mat.[ri, r]
+                mat.[ri, c] <-  cos * A + sin * B
+                mat.[ri, r] <- -sin * A + cos * B
+
+        let applyGivensTransposed (mat : float[,]) (c : int) (r : int) (cos : float) (sin : float) =
+            let cols = mat.GetLength(1)
+            // adjust affected elements
+            for ci in 0 .. cols - 1 do
+                let A = mat.[c, ci]
+                let B = mat.[r, ci]
+                mat.[c, ci] <-  cos * A + sin * B
+                mat.[r, ci] <- -sin * A + cos * B
             
         let inline applyGivensMat (mat : NativeMatrix<float>) (c : int) (r : int) (cos : float) (sin : float) =
             let ptrQ = NativePtr.toNativeInt mat.Pointer
             let dcQ = nativeint sizeof<float> * nativeint mat.DX
             let drQ = nativeint sizeof<float> * nativeint mat.DY
-            let cols = int mat.SX
+            let rows = int mat.SY
 
             let mutable p0 = ptrQ + nativeint c * dcQ 
             let mutable p1 = ptrQ + nativeint r * dcQ      
             // adjust affected elements
-            for ci in 0 .. cols - 1 do
+            for _ in 0 .. rows - 1 do
                 let A = NativeInt.read<float> p0 //mat.[ci, c]
                 let B = NativeInt.read<float> p1 //mat.[ci, r]
 
@@ -78,12 +177,12 @@ module QR =
             let ptrQ = NativePtr.toNativeInt mat.Pointer
             let dcQ = nativeint sizeof<float> * nativeint mat.DX
             let drQ = nativeint sizeof<float> * nativeint mat.DY
-            let rows = int mat.SY
+            let cols = int mat.SX
 
             let mutable p0 = ptrQ + nativeint c * drQ 
             let mutable p1 = ptrQ + nativeint r * drQ      
             // adjust affected elements
-            for ri in 0 .. rows - 1 do
+            for _ in 0 .. cols - 1 do
                 let A = NativeInt.read<float> p0
                 let B = NativeInt.read<float> p1
                 NativeInt.write p0 ( cos * A + sin * B )
@@ -92,26 +191,6 @@ module QR =
                 p0 <- p0 + dcQ
                 p1 <- p1 + dcQ
 
-        let inline applyGivensMat32 (mat : NativeMatrix<float32>) (c : int) (r : int) (cos : float32) (sin : float32) =
-            let ptrQ = NativePtr.toNativeInt mat.Pointer
-            let dcQ = nativeint sizeof<float32> * nativeint mat.DX
-            let drQ = nativeint sizeof<float32> * nativeint mat.DY
-            let cols = int mat.SX
-
-            let mutable p0 = ptrQ + nativeint c * dcQ 
-            let mutable p1 = ptrQ + nativeint r * dcQ      
-            // adjust affected elements
-            for ci in 0 .. cols - 1 do
-                let A = NativeInt.read<float32> p0 //mat.[ci, c]
-                let B = NativeInt.read<float32> p1 //mat.[ci, r]
-
-                //mat.[ci, c] <-  cos * A + sin * B
-                //mat.[ci, r] <- -sin * A + cos * B
-                NativeInt.write p0 ( cos * A + sin * B )
-                NativeInt.write p1 (-sin * A + cos * B )
-
-                p0 <- p0 + drQ
-                p1 <- p1 + drQ
 
     let decompose (eps : float) (mat : float[,]) =
         let rows = mat.GetLength(0)
@@ -156,7 +235,7 @@ module QR =
         // set u and v to identity
         U.SetByCoord(fun (v : V2i) -> if v.X = v.Y then 1.0 else 0.0)
         Vt.SetByCoord(fun (v : V2i) -> if v.X = v.Y then 1.0 else 0.0)
-        
+
         let sa = nativeint sizeof<float>
         let pB = NativePtr.toNativeInt B.Pointer
         let dbr = nativeint B.DY * sa
@@ -193,7 +272,7 @@ module QR =
                     pr1 <- pr1 + dbc
                     pr0 <- pr0 + dbc
 
-                    for _ in i + 1 .. cols - 1 do
+                    for _ in i+1 .. cols - 1 do
                         let a = NativeInt.read<float> pr0 //B.[r0,ci]
                         let b = NativeInt.read<float> pr1 //B.[r1,ci]
                         NativeInt.write pr0 ( cos * a + sin * b )
@@ -238,7 +317,7 @@ module QR =
                     pc1 <- pc1 + dbr
 
 
-                    for _ in i.. rows - 1 do
+                    for _ in i .. rows - 1 do
                         let a = NativeInt.read<float> pc0 //B.[r0,ci]
                         let b = NativeInt.read<float> pc1 //B.[r1,ci]
                         NativeInt.write pc0 ( cos * a + sin * b )
@@ -251,7 +330,7 @@ module QR =
                     
                 pij <- pij + dbc
                 
-            let normv = 
+            let normv =
                 if i > 0 then 
                     // abs B.[i-1,i] + abs B.[i,i]
                     abs (NativeInt.read<float> (pii - dbc - dbr)) + abs (NativeInt.read<float> (pii - dbc))
@@ -265,7 +344,183 @@ module QR =
         anorm
 
     let internal svdBidiagonalNative (anorm : float) (U : NativeMatrix<float>) (B : NativeMatrix<float>) (Vt : NativeMatrix<float>) : unit =
-        failwith "not implemented"
+        let mutable c = 0.0
+        let mutable s = 0.0
+        let mutable rvl0 = 0.0
+
+        let n = int B.SY
+        let m = int B.SX
+
+        let pB = NativePtr.toNativeInt B.Pointer
+        let sa = nativeint sizeof<float>
+        let dbc = nativeint B.DX * sa
+        let dbr = nativeint B.DY * sa
+
+        let pw = pB
+        let dw = dbc + dbr
+
+        let prvl = pB + dbc
+        let drvl = dw
+        
+        let inline rvl i =
+            if i = 0 then rvl0
+            else NativeInt.read<float> (prvl + nativeint (i - 1) * drvl) //B.[i-1,i]
+                
+        let inline setrvl i v =
+            if i = 0 then rvl0 <- v
+            else NativeInt.write (prvl + nativeint (i - 1) * drvl) v //B.[i-1,i] <- v
+
+        let inline w i =
+            NativeInt.read<float> (pw + nativeint i * dw)
+            
+        let inline setw i (v : float) =
+            NativeInt.write (pw + nativeint i * dw) v
+             
+        let mutable f = 0.0
+        let mutable g = 0.0
+        let mutable h = 0.0
+        
+        let mutable x = 0.0
+        let mutable y = 0.0
+        let mutable z = 0.0
+
+        for k in m - 1 .. -1 .. 0 do 
+            let mutable conv = false
+            let mutable iterations = 0
+            while not conv && iterations <= 30 do
+                inc &iterations
+                let mutable flag = true
+                let mutable nm = 0
+                let mutable l = k
+                let mutable testing = true
+                while testing && l >= 0 do
+                    nm <- l - 1
+                    if abs (rvl l) + anorm = anorm then
+                        flag <- false
+                        testing <- false
+                    elif abs (w nm) + anorm = anorm then
+                        testing <- false
+                    else
+                        dec &l
+
+                    
+                if flag then
+                    c <- 0.0
+                    s <- 1.0
+                    for i in l .. k do
+                        f <- s * rvl i
+                        if abs f + anorm <> anorm then
+                            g <- w i //B.[i,i]
+                            h <- Fun.Pythag(f, g)
+                            setw i h // B.[i,i] <- h
+                            h <- 1.0 / h
+                            c <- g * h
+                            s <- -f * h
+
+                            applyGivensMat U nm i c s
+                            
+                z <- w k //B.[k,k] 
+                if l = k then
+                    conv <- true
+                else
+
+                    if (iterations >= 30) then
+                        failwith "no convergence after 30 iterations"
+
+                    // shift from bottom 2 x 2 minor
+                    x <- w l //B.[l,l];
+                    nm <- k - 1;
+                    y <- w nm //B.[nm, nm];
+
+                    g <- rvl nm;
+                    h <- rvl k;
+                    f <- ((y - z) * (y + z) + (g - h) * (g + h)) / (2.0 * h * y)
+                    g <- Fun.Pythag(f, 1.0)
+                    f <- ((x - z) * (x + z) + h * ((y / (f + (if (f >= 0.0) then abs(g) else -abs(g)))) - h)) / x
+
+                    // next QR transformation
+                    c <- 1.0
+                    s <- 1.0
+
+                    for j in l .. nm do
+                        let i = j + 1
+                        g <- rvl i
+                        y <- w i //B.[i,i]
+                        h <- s * g
+                        g <- c * g
+                        z <- Fun.Pythag(f, h)
+                        setrvl j z
+                        c <- f / z
+                        s <- h / z
+                        f <- x * c + g * s
+                        g <- g * c - x * s
+                        h <- y * s
+                        y <- y * c
+                        applyGivensTransposedMat Vt j i c s
+
+                        z <- Fun.Pythag(f, h)
+                        setw j z //B.[j,j] <- z
+
+                        if z <> 0.0 then
+                            z <- 1.0 / z
+                            c <- f * z
+                            s <- h * z
+
+                        f <- (c * g) + (s * y)
+                        x <- (c * y) - (s * g)
+                        applyGivensMat U j i c s
+                    
+                    setrvl l 0.0
+                    setrvl k f
+                    setw k x // B.[k,k] <- x
+        
+        let inline swap i0 i1 =
+            applyGivensMat U i0 i1 0.0 1.0
+            let t = w i0
+            setw i0 (w i1)
+            setw i1 t
+            applyGivensTransposedMat Vt i0 i1 0.0 1.0
+        let mutable values = MapExt.empty
+        let cmp = System.Func<_,_,_>(fun (_,l) (_,r) -> compare r l) 
+        let heap = System.Collections.Generic.List<int * float>()
+        for i in 0 .. m - 1 do
+            let v = abs (w i) //B.[i,i]
+            values <- 
+                MapExt.alter v (fun o ->
+                    let o = defaultArg o []
+                    Some (i :: o)
+                ) values
+                
+        for i0 in 0..m-1 do
+            let biggestIdx =
+                let (key, indices) = MapExt.tryItem (values.Count - 1) values |> Option.get
+                match indices with
+                    | [i0] -> 
+                        values <- MapExt.remove key values
+                        i0
+                    | i0 :: r ->
+                        values <- MapExt.add key r values
+                        i0
+                    | _ ->
+                        failwith ""
+                
+            if biggestIdx <> i0 then
+                let v0 = w i0 //B.[i0, i0]
+                swap i0 biggestIdx
+               
+                values <- 
+                    MapExt.alter v0 (fun o ->
+                        let o = Option.defaultValue [] o
+                        o |> List.map (fun ii -> if ii = i0 then biggestIdx else ii) |> Some
+                    ) values
+
+    
+        for i0 in 0..m-2 do
+            if w i0 < 0.0 then
+                let i1 = m-1
+                setw i0 (-w i0)
+                setw i1 (-w i1)
+                applyGivensTransposedMat Vt i0 i1 -1.0 0.0
 
     let svdNative (U : NativeMatrix<float>) (B : NativeMatrix<float>) (Vt : NativeMatrix<float>) =
         if B.SX <= B.SY then
@@ -275,12 +530,10 @@ module QR =
             // B = U * B' * Vt
             // Bt = V * Bt' * Ut
             let Ut = U.Transposed
-            let V = Ut.Transposed
+            let V = Vt.Transposed
             let Bt = B.Transposed
             let anorm = bidiagonalizeNative V Bt Ut
             svdBidiagonalNative anorm V Bt Ut
-
-
 
     let bidiagonalize (eps : float) (mat : float[,]) =
         let rows = mat.GetLength(0)
@@ -411,7 +664,7 @@ module QR =
                 if not (tiny eps vrc) then
 
                     // find givens rotation
-                    let rho = float (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
+                    let rho = sgn vcc * sqrt (vcc * vcc + vrc * vrc)
                     let cos = vcc / rho
                     let sin = vrc / rho
                     
@@ -631,59 +884,6 @@ module QR =
 
         U, B, Vt
 
-
-    let decomposeNative32 (eps : float32) (pQ : NativeMatrix<float32>) (pR : NativeMatrix<float32>) =
-        let rows = int pR.SY
-        let cols = int pR.SX
-
-        // pQ <- identity
-        pQ.SetByCoord (fun (v : V2i) -> if v.X = v.Y then 1.0f else 0.0f)
-        
-        let sa = nativeint sizeof<float32>
-        let drR = nativeint pR.DY * sa
-        let dcR = nativeint pR.DX * sa
-
-        let mutable pc0 = NativePtr.toNativeInt pR.Pointer
-        let mutable pcc = pc0
-        for c in 0 .. cols - 1 do
-            // wiki performs this loop backwards (should not really matter)
-            let mutable prc = pcc + drR
-            let mutable pr0 = pc0 + drR
-            for r in c + 1 .. rows - 1 do 
-                let vcc = NativeInt.read<float32> pcc // important since R.[c,c] changes
-                let vrc = NativeInt.read<float32> prc 
-
-                // if the dst-element is not already zero then make it zero
-                if not (tiny eps vrc) then
-
-                    // find givens rotation
-                    let rho = float32 (sign vcc) * sqrt (vcc * vcc + vrc * vrc)
-                    let cos = vcc / rho
-                    let sin = vrc / rho
-                    
-                    let mutable p0 = pcc
-                    let mutable p1 = prc 
-                    // adjust affected elements
-                    for ci in c .. cols - 1 do
-                        let A = NativeInt.read<float32> p0
-                        let B = NativeInt.read<float32> p1
-                        
-                        NativeInt.write p0 ( cos * A + sin * B )
-                        NativeInt.write p1 (-sin * A + cos * B )
-
-                        p0 <- p0 + dcR
-                        p1 <- p1 + dcR
-
-                        
-                    // adjust the resulting Q matrix
-                    applyGivensMat32 pQ c r cos sin
-                
-                pr0 <- pr0 + drR
-                prc <- prc + drR
-            
-            pc0 <- pc0 + drR
-            pcc <- pcc + drR + dcR
-
     let decomposeMat (eps : float) (mat : Matrix<float>) =
         let rows = int mat.SY
         let cols = int mat.SX
@@ -697,170 +897,7 @@ module QR =
                 Q, R
             )
         )
-[<AbstractClass; Sealed; Extension>]
-type QRExtensions private() =
-    [<Extension>]
-    static member QRFactorize(this : M33d, ?eps : float) =
-        let eps = defaultArg eps 1E-20
-        let mutable Q = M33d()
-        let mutable R = this
 
-        let pQ = 
-            NativeMatrix<float>(
-                NativePtr.cast &&Q,
-                MatrixInfo(
-                    0L,
-                    V2l(3, 3),
-                    V2l(1, 3)
-                )
-            )
-        let pR = 
-            NativeMatrix<float>(
-                NativePtr.cast &&R,
-                MatrixInfo(
-                    0L,
-                    V2l(3, 3),
-                    V2l(1, 3)
-                )
-            )
-        QR.decomposeNative eps pQ pR
-        Q, R
-        
-    [<Extension>]
-    static member QRFactorize(this : M44d, ?eps : float) =
-        let eps = defaultArg eps 1E-20
-        let mutable Q = M44d()
-        let mutable R = this
-
-        let pQ = 
-            NativeMatrix<float>(
-                NativePtr.cast &&Q,
-                MatrixInfo(
-                    0L,
-                    V2l(4, 4),
-                    V2l(1, 4)
-                )
-            )
-        let pR = 
-            NativeMatrix<float>(
-                NativePtr.cast &&R,
-                MatrixInfo(
-                    0L,
-                    V2l(4, 4),
-                    V2l(1, 4)
-                )
-            )
-        QR.decomposeNative eps pQ pR
-        Q, R
-        
-    [<Extension>]
-    static member QRFactorize(this : M34d, ?eps : float) =
-        let eps = defaultArg eps 1E-20
-        let mutable Q = M33d()
-        let mutable R = this
-
-        let pQ = 
-            NativeMatrix<float>(
-                NativePtr.cast &&Q,
-                MatrixInfo(
-                    0L,
-                    V2l(3, 3),
-                    V2l(1, 3)
-                )
-            )
-        let pR = 
-            NativeMatrix<float>(
-                NativePtr.cast &&R,
-                MatrixInfo(
-                    0L,
-                    V2l(4, 3),
-                    V2l(1, 4)
-                )
-            )
-        QR.decomposeNative eps pQ pR
-        Q, R
-        
-    [<Extension>]
-    static member QRFactorize(this : M33f, ?eps : float32) =
-        let eps = defaultArg eps 1E-10f
-        let mutable Q = M33f()
-        let mutable R = this
-
-        let pQ = 
-            NativeMatrix<float32>(
-                NativePtr.cast &&Q,
-                MatrixInfo(
-                    0L,
-                    V2l(3, 3),
-                    V2l(1, 3)
-                )
-            )
-        let pR = 
-            NativeMatrix<float32>(
-                NativePtr.cast &&R,
-                MatrixInfo(
-                    0L,
-                    V2l(3, 3),
-                    V2l(1, 3)
-                )
-            )
-        QR.decomposeNative32 eps pQ pR
-        Q, R
-        
-    [<Extension>]
-    static member QRFactorize(this : M44f, ?eps : float32) =
-        let eps = defaultArg eps 1E-10f
-        let mutable Q = M44f()
-        let mutable R = this
-
-        let pQ = 
-            NativeMatrix<float32>(
-                NativePtr.cast &&Q,
-                MatrixInfo(
-                    0L,
-                    V2l(4, 4),
-                    V2l(1, 4)
-                )
-            )
-        let pR = 
-            NativeMatrix<float32>(
-                NativePtr.cast &&R,
-                MatrixInfo(
-                    0L,
-                    V2l(4, 4),
-                    V2l(1, 4)
-                )
-            )
-        QR.decomposeNative32 eps pQ pR
-        Q, R
-          
-    [<Extension>]
-    static member QRFactorize(this : M34f, ?eps : float32) =
-        let eps = defaultArg eps 1E-10f
-        let mutable Q = M33f()
-        let mutable R = this
-
-        let pQ = 
-            NativeMatrix<float32>(
-                NativePtr.cast &&Q,
-                MatrixInfo(
-                    0L,
-                    V2l(3, 3),
-                    V2l(1, 3)
-                )
-            )
-        let pR = 
-            NativeMatrix<float32>(
-                NativePtr.cast &&R,
-                MatrixInfo(
-                    0L,
-                    V2l(4, 3),
-                    V2l(1, 4)
-                )
-            )
-        QR.decomposeNative32 eps pQ pR
-        Q, R
-        
 module Matrix =
     open Aardvark.Base.MultimethodTest
 
@@ -868,15 +905,30 @@ module Matrix =
         Array2D.init (int m.SY) (int m.SX) (fun r c ->
             m.[c,r]
         )
+        
+    let toArrayT (m : Matrix<'a>) =
+        Array2D.init (int m.SX) (int m.SY) (fun r c ->
+            m.[r,c]
+        )
 
     let ofArray (m : 'a[,]) =
         let r = m.GetLength(0)
         let c = m.GetLength(1)
 
-        let mat = Matrix(int64 c, int64 r)
+        let mutable mat = Matrix(int64 c, int64 r)
         mat.SetByCoord(fun (c : V2l) ->
             m.[int c.Y, int c.X]
-        )
+        ) |> ignore
+        mat
+    let ofArrayT (m : 'a[,]) =
+        let r = m.GetLength(0)
+        let c = m.GetLength(1)
+
+        let mutable mat = Matrix(int64 r, int64 c)
+        mat.SetByCoord(fun (c : V2l) ->
+            m.[int c.X, int c.Y]
+        ) |> ignore
+        mat
 
 [<AutoOpen>]
 module MatrixUtils =
@@ -1046,13 +1098,11 @@ module MatrixUtils =
 
 module QRTest =
     open System.Collections.Generic
+    open System.Diagnostics
 
     let rand = System.Random()
 
-    let random () =
-        let rows = rand.Next(64) + 1
-        let cols = rand.Next(64) + 1
-
+    let random rows cols =
         Array2D.init rows cols (fun r c ->
             rand.NextDouble() * 20.0 - 10.0
         )
@@ -1087,11 +1137,16 @@ module QRTest =
                         applyGivens mat c r (cos angle) (sin angle)
                 
                 mat
+
+            fun r c ->
+                Array2D.init r c (fun r c ->
+                    if r = c then 0.0
+                    else rand.NextDouble() * 20.0 - 10.0
+                )
+
         |]
 
-    let randomSpecial () =
-        let rows = rand.Next(10) + 1
-        let cols = rand.Next(10) + 1
+    let randomSpecial rows cols =
         let case = specialCases.[rand.Next(specialCases.Length)]
         case rows cols
         
@@ -1133,7 +1188,7 @@ module QRTest =
 
         valid
         
-    let errorMetrics (iter : int) =
+    let errorMetrics (square : bool) (name : string) (reconstruct : float[,] -> float[,]) (iter : int) =
         let buckets = SortedDictionary<int, ref<float * int>>()
 
         let add (value : float) =
@@ -1155,31 +1210,18 @@ module QRTest =
         let mutable error = false
         for i in 1 .. iter do
             if not error then
-                let mat = if rand.NextDouble() > 0.1 then random() else randomSpecial()
-                let Q, R = QR.decomposeMat 1.0E-20 (Matrix.ofArray mat)
-                let Q = Matrix.toArray Q
-                let R = Matrix.toArray R
-
-
-                let (min, max, avg) = rightUpper R
-                if max > tolerance then 
-                    printfn "not right upper: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
-                    print R
-                    printfn "input"
-                    print mat
-                    error <- true
-
-                let (min, max, avg) = distanceMinMaxAvg (mul Q (transpose Q)) (identity (Q.GetLength(0)) (Q.GetLength(1)))
-                if max > tolerance then 
-                    printfn "not ortho: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (Q.GetLength(0)) (Q.GetLength(1)) min max avg
-                    print Q
-                    printfn "Q * Qt"
-                    print (mul Q (transpose Q))
-                    error <- true
-
-                let test = mul Q R
+                let rows, cols =
+                    if square then 
+                        let s = 1 + rand.Next(64)
+                        s,s
+                    else 
+                        1 + rand.Next(64), 1 + rand.Next(64)
+                let mat = if rand.NextDouble() > 0.1 then random rows cols else randomSpecial rows cols
+                let test = reconstruct mat
                 let (min, max, avg) = distanceMinMaxAvg mat test
-                printfn "valid: { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
+                if max > 1E-5 then
+                    printfn "bad:   { size = [%d, %d]; min = %e; max = %e; avg = %e }" (mat.GetLength(0)) (mat.GetLength(1)) min max avg
+                    
                 add max
 
         if not error then
@@ -1199,160 +1241,269 @@ module QRTest =
                 |]
 
             let printTable (arr : string[][]) =
+                let pad (l : int) (c : char) (str : string) =
+                    if str.Length < l then
+                        let diff = l - str.Length
+                        let left = diff / 2
+                        let right = diff - left
+                        System.String(c, left) + str + System.String(c, right)
+                    else
+                        str
+
                 let maxLength =
                     arr |> Seq.collect (fun row ->
                         row |> Seq.map (fun str -> str.Length)
                     )
                     |> Seq.max
 
-                let pad (str : string) =
-                    if str.Length < maxLength then
-                        let diff = maxLength - str.Length
-                        let left = diff / 2
-                        let right = diff - left
-                        System.String(' ', left) + str + System.String(' ', right)
-                    else
-                        str
-            
                 let totalLength = arr.[0].Length * (maxLength + 4) //+ (arr.[0].Length - 1) * 3
-                let line = System.String('-', totalLength)
+                let line = pad totalLength '-' (" " + name + " ")
                 printfn "%s" line
 
                 for row in arr do
                     printf "|"
                     for e in row do
-                        printf " %s | " (pad e)
+                        printf " %s | " (pad maxLength ' ' e)
                     printfn ""
-                
+
+                let line = System.String('-', totalLength)
                 printfn "%s" line
                 ()
 
             printTable table
 
-    let validateSpecial(iter : int) =
-        let mutable valid = true
-        printfn "special cases: "
-        for i in 1 .. iter do
-            let m = randomSpecial()
-            valid <- valid && check 1.0E-20 m
+    let metrics (iter : int) =
+        let reconstructSVD (m : float[,]) =
+            let S = Array2D.copy m
+            let rows = m.GetLength(0)
+            let cols = m.GetLength(1)
+            let U = Array2D.zeroCreate rows rows
+            let Vt = Array2D.zeroCreate cols cols
+            NativeMatrix.using S (fun ps ->
+                NativeMatrix.using U (fun pu ->
+                    NativeMatrix.using Vt (fun pvt ->
+                        QR.svdNative pu ps pvt
+                    )
+                )
+            )
+
+            mul U (mul S Vt)
+
+        let reconstructQR (m : float[,]) =
+            let R = Array2D.copy m
+            let rows = m.GetLength(0)
+            let Q = Array2D.zeroCreate rows rows
+
+            NativeMatrix.using R (fun pr ->
+                NativeMatrix.using Q (fun pq ->
+                    QR.decomposeNative 1E-20 pq pr
+                )
+            )
+
+            mul Q R
+
+        let reconstructLU (m : float[,]) =
+            try
+                let s = m.GetLength(0)
+                let m = Array2D.copy m
+                let perm = m.LuFactorize()
+
+                    
+                let iperm = Array.zeroCreate perm.Length
+                for i in 0 .. perm.Length-1 do
+                    iperm.[perm.[i]] <- i
+
+                let L =
+                    Array2D.init s s (fun r c ->
+                        let r = iperm.[r]
+                        if c < r then
+                            m.[r, c]
+                        elif c = r then
+                            1.0
+                        else
+                            0.0
+                    )
+                let R =
+                    Array2D.init s s (fun r c ->
+                        if c >= r then
+                            m.[r, c]
+                        else
+                            0.0
+                    )
+                    
+                mul L R
+            with _ ->
+                m
         
 
-    let validate(iter : int) =
-        let mutable valid = true
-        printfn "special cases: "
-        for i in 1 .. 100 do
-            let m = randomSpecial()
-            valid <- valid && check 1.0E-20 m
+        let reconstructRautenSharp (m : float[,]) =
+            let rows = m.GetLength(0)
+            let cols = m.GetLength(1)
+                
+            let toCol (m : float[,]) =
+                let rows = m.GetLength(0)
+                let cols = m.GetLength(1)
+                
+                Array.init (rows * cols) (fun i ->
+                    let r = i % rows
+                    let c = i / rows
+                    m.[r,c]
+                )
+            let ofCol (rows : int) (cols : int) (m : float[]) =
+                Array2D.init rows cols (fun r c ->
+                    m.[c * rows + r]
+                )
+                
+            let u = Array.zeroCreate (rows * rows)
+            let s = Array.zeroCreate (min rows cols)
+            let vt = Array.zeroCreate (cols * cols)
+
+            RautenSharp.Class2.SingularValueDecomposition(true, true, toCol m, m.GetLength(0), m.GetLength(1), s, u, vt)
+        
+
+            let U = ofCol rows rows u
+            let Vt = ofCol cols cols vt
+            let S =
+                Array2D.init rows cols (fun r c ->
+                    if r = c && r < s.Length then s.[r]
+                    else 0.0
+                )
+            mul U (mul S Vt)
+
+
+        errorMetrics false "QR" reconstructQR iter
+        printfn ""
+        errorMetrics false "SVD" reconstructSVD iter
+        printfn ""
+        errorMetrics true "LU" reconstructLU iter
+        printfn ""
+        errorMetrics true "RautenSharp" reconstructRautenSharp iter
+
+    let perf () =
+        let iter = 100000
+        let rows = 16
+        let cols = 16
         
         
-        printfn "general cases: "
-        for i in 1 .. iter do
-            let m = random()
-            valid <- valid && check 1.0E-20 m
 
-    // https://de.wikipedia.org/wiki/Givens-Rotation
-    let wikiExample() =
-        let A = 
-            arr2d 4 2 [|
-                3.0; 5.0
-                0.0; 2.0
-                0.0; 0.0
-                4.0; 5.0
-            |] 
-
-        let Qexpected =
-            arr2d 4 4 [|
-                3.0 / 5.0;      4.0 / (5.0 * sqrt 5.0);         0.0;        -8.0 / (5.0 * sqrt 5.0)
-                0.0;            2.0 / (sqrt 5.0);               0.0;        1.0 / (sqrt 5.0)
-                0.0;            0.0;                            1.0;        0.0
-                4.0 / 5.0;      -3.0/(5.0 * sqrt 5.0);          0.0;        6.0/(5.0 * sqrt 5.0)
-            |]
-
-        let Rexpected =
-            arr2d 4 2 [|
-                5.0; 7.0
-                0.0; sqrt 5.0
-                0.0; 0.0
-                0.0; 0.0
-            |]
-
-        printfn "A: "
-        print A
-
-        printfn "Qexpected:" 
-        print Qexpected
-
-        let Q, R = QR.decompose 1E-20 A
-        printfn "Q: "
-        print Q
-    
-        printfn "Rexpected:" 
-        print Rexpected
-
-        printfn "R: "
-        print R
-        
-    open Aardvark.VRVis
-    let bidiag() =
-        let rows = 6
-        let cols = 6
-        
         let m = 
             Array2D.init rows cols (fun r c ->
                 rand.NextDouble() * 20.0 - 10.0
             )
+
+
+        let luTime() =
+            for i in 1 .. 5 do
+                let B = Array2D.copy m
+                let perm = B.LuFactorize()
+                B.LuInverse(perm) |> ignore
+
+            let sw = Stopwatch()
+            for i in 1 .. iter do
+                let B = Array2D.copy m
+                sw.Start()
+                let perm = B.LuFactorize()
+                let inv = B.LuInverse(perm)
+                sw.Stop()
+
+            sw.MicroTime / iter
             
-        let svd = (Matrix.ofArray m).SVD()
+        let qrTime() =
+            for i in 1 .. 5 do
+                let B = Array2D.copy m
+                B.QrInverse() |> ignore
 
-        let Ua = Matrix.toArray svd.U
-        let Wa = svd.W.Array
-        let Va = Matrix.toArray svd.V
+            let sw = Stopwatch()
+            for i in 1 .. iter do
+                let B = Array2D.copy m
+                sw.Start()
+                let inv = B.QrInverse()
+                sw.Stop()
 
+            sw.MicroTime / iter
+              
+        let qrnTime() =
+            let Q = Array2D.copy m
+            NativeMatrix.using Q (fun q ->
+                for i in 1 .. 5 do
+                    let B = Array2D.copy m
+                    NativeMatrix.using B (fun b ->
+                        QR.decomposeNative 1E-20 q b |> ignore
+                    )
 
-        let (U, B, Vt,anorm) =
-            let m = Matrix.ofArray m
-            let u = Matrix(int64 cols, int64 cols)
-            let vt = Matrix(int64 rows, int64 rows)
-            let anorm = 
-                NativeMatrix.using m (fun pm ->
-                    NativeMatrix.using u (fun pu ->
-                        NativeMatrix.using vt (fun pvt ->
-                            QR.bidiagonalizeNative pu pm pvt
+                let sw = Stopwatch()
+                for i in 1 .. iter do
+                    let B = Array2D.copy m
+                    sw.Start()
+                    NativeMatrix.using B (fun b ->
+                        QR.decomposeNative 1E-20 q b |> ignore
+                    )
+                    sw.Stop()
+
+                sw.MicroTime / iter
+            )
+
+        let svdTime() =
+            for i in 1 .. 5 do
+                let B = Array2D.copy m
+                let U = Array2D.zeroCreate rows rows
+                let Vt = Array2D.zeroCreate cols cols
+                
+                NativeMatrix.using B (fun b ->
+                    NativeMatrix.using U (fun u ->
+                        NativeMatrix.using Vt (fun vt ->
+                            QR.svdNative u b vt
                         )
                     )
                 )
-            Matrix.toArray u, Matrix.toArray m, Matrix.toArray vt, anorm
+            let sw = Stopwatch()
+            for i in 1 .. iter do
+                let B = Array2D.copy m
+                let U = Array2D.zeroCreate rows rows
+                let Vt = Array2D.zeroCreate cols cols
+                
+                sw.Start()
+                NativeMatrix.using B (fun b ->
+                    NativeMatrix.using U (fun u ->
+                        NativeMatrix.using Vt (fun vt ->
+                            QR.svdNative u b vt
+                        )
+                    )
+                )
+                sw.Stop()
 
+            sw.MicroTime / iter
+            
+        let svdoTime() =
+            for i in 1 .. 5 do
+                let B = Matrix.ofArray m
+                let U = Array2D.zeroCreate rows rows
+                let Vt = Array2D.zeroCreate cols cols
+                
+                B.SVD() |> ignore
 
-        //let (U,B,Vt) = QR.bidiagonalize 1E-20 m
+            let sw = Stopwatch()
+            for i in 1 .. iter do
+                let B = Matrix.ofArray m
+                
+                sw.Start()
+                B.SVD() |> ignore
+                sw.Stop()
 
-        let test = mul U (mul B Vt)
-        printfn "Bidiag-test: %A" <| distanceMinMaxAvg test m
-        printfn "Bidiag: %.3f" anorm
-        print B
+            sw.MicroTime / iter
 
-        //let (U,B,Vt) = QR.svdBidiagonal U B Vt
-        //let test = mul U (mul B Vt)
-        //printfn "%A" <| distanceMinMaxAvg test m
+        printf "LU:  "
+        printfn "%A" (luTime())
+
+        printf "QR:  "
+        printfn "%A" (qrTime())
         
-        ////printfn "raute"
-        ////printfn "Ua"
-        ////print Ua
-        ////printfn "Ba"
-        ////printfn "%A" Wa
-        ////printfn "Va"
-        ////print Va
+        printf "QR2: "
+        printfn "%A" (qrnTime())
 
-        //printfn "fsharp"
-        //printfn "U"
-        //print U
-        //printfn "B"
-        //print B
-        //printfn "Vt"
-        //print Vt
-        //printfn "det(U) = %A" (determinant U)
-        //printfn "det(V) = %A" (determinant Vt)
-        ()
-        //printfn "Vt"
-        //print Vt
+        printf "SVD: "
+        printfn "%A" (svdTime())
+        
+        printf "SVO: "
+        printfn "%A" (svdoTime())
         
