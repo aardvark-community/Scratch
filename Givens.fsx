@@ -418,7 +418,7 @@ module QR =
                             s <- -f * h
 
                             applyGivensMat U nm i c s
-                            
+    
                 z <- w k //B.[k,k] 
                 if l = k then
                     conv <- true
@@ -474,17 +474,26 @@ module QR =
                     setrvl k f
                     setw k x // B.[k,k] <- x
         
+
+        for i in 1 .. m - 1 do
+            setrvl i 0.0
+
         let inline swap i0 i1 =
             applyGivensMat U i0 i1 0.0 1.0
             let t = w i0
             setw i0 (w i1)
             setw i1 t
             applyGivensTransposedMat Vt i0 i1 0.0 1.0
-        let mutable values = MapExt.empty
-        let cmp = System.Func<_,_,_>(fun (_,l) (_,r) -> compare r l) 
-        let heap = System.Collections.Generic.List<int * float>()
+
+        let cmp =
+            { new System.Collections.Generic.IComparer<float> with
+                member x.Compare(l, r) =
+                    compare (abs l) (abs r)
+            }
+
+        let mutable values = MapExt<_,_>(cmp, MapExtImplementation.MapEmpty)
         for i in 0 .. m - 1 do
-            let v = abs (w i) //B.[i,i]
+            let v = w i //B.[i,i]
             values <- 
                 MapExt.alter v (fun o ->
                     let o = defaultArg o []
